@@ -356,10 +356,12 @@ fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
             frame.render_widget(p, content_area);
         }
         ObjectState::Loaded(data) => {
+            let selected = app.inspector_sel;
+            let mut link_idx = 0usize;
             let mut lines = Vec::new();
-            append_metadata_lines(&mut lines, data);
+            append_metadata_lines(&mut lines, data, selected, &mut link_idx);
             append_properties_lines(&mut lines, data);
-            append_dyn_fields_lines(&mut lines, &app.dyn_fields_state);
+            append_dyn_fields_lines(&mut lines, &app.dyn_fields_state, selected, &mut link_idx);
 
             let p = Paragraph::new(lines).block(block);
             frame.render_widget(p, content_area);
@@ -379,7 +381,12 @@ fn format_owner(owner: &OwnerInfo) -> String {
     }
 }
 
-fn append_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, data: &ObjectData) {
+fn append_metadata_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    data: &ObjectData,
+    selected: usize,
+    link_idx: &mut usize,
+) {
     let label = Style::default().fg(Color::Gray);
 
     lines.push(Line::from(vec![
@@ -394,10 +401,30 @@ fn append_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, data: &ObjectData) {
         Span::styled("  Digest:   ", label),
         Span::raw(data.digest.clone()),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Owner:    ", label),
-        Span::raw(format_owner(&data.owner)),
-    ]));
+
+    let owner_is_linkable = matches!(&data.owner, OwnerInfo::Address(a) | OwnerInfo::Object(a) if a.parse::<Address>().is_ok());
+    if owner_is_linkable {
+        let is_selected = *link_idx == selected;
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}Owner:    "), label),
+            Span::styled(format_owner(&data.owner), value_style),
+        ]));
+        *link_idx += 1;
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Owner:    ", label),
+            Span::raw(format_owner(&data.owner)),
+        ]));
+    }
+
     lines.push(Line::from(vec![
         Span::styled("  Prev Tx:  ", label),
         Span::raw(data.previous_transaction.clone()),
@@ -478,7 +505,12 @@ fn format_json_scalar(v: &serde_json::Value) -> String {
     }
 }
 
-fn append_dyn_fields_lines<'a>(lines: &mut Vec<Line<'a>>, state: &DynFieldsState) {
+fn append_dyn_fields_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    state: &DynFieldsState,
+    selected: usize,
+    link_idx: &mut usize,
+) {
     lines.push(Line::raw(""));
     match state {
         DynFieldsState::Idle => {}
@@ -519,12 +551,36 @@ fn append_dyn_fields_lines<'a>(lines: &mut Vec<Line<'a>>, state: &DynFieldsState
                         DynFieldKind::Object => "Object",
                         DynFieldKind::Unknown => "???   ",
                     };
-                    let child = f.child_id.as_deref().unwrap_or("");
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(kind_str, Style::default().fg(Color::Yellow)),
-                        Span::raw(format!("  {}  {}  {}", f.field_id, f.value_type, child)),
-                    ]));
+                    let is_linkable = f.child_id.is_some()
+                        && f.child_id
+                            .as_ref()
+                            .is_some_and(|id| id.parse::<Address>().is_ok());
+                    if is_linkable {
+                        let is_selected = *link_idx == selected;
+                        let prefix = if is_selected { "> " } else { "  " };
+                        let child = f.child_id.clone().unwrap_or_default();
+                        let child_style = if is_selected {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Cyan)
+                        };
+                        lines.push(Line::from(vec![
+                            Span::raw(prefix.to_string()),
+                            Span::styled(kind_str, Style::default().fg(Color::Yellow)),
+                            Span::raw(format!("  {}  {}  ", f.field_id, f.value_type)),
+                            Span::styled(child, child_style),
+                        ]));
+                        *link_idx += 1;
+                    } else {
+                        let child = f.child_id.as_deref().unwrap_or("");
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(kind_str, Style::default().fg(Color::Yellow)),
+                            Span::raw(format!("  {}  {}  {}", f.field_id, f.value_type, child)),
+                        ]));
+                    }
                 }
             }
         }
@@ -535,6 +591,10 @@ fn draw_inspector_help_bar(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(Line::from(vec![
         Span::styled("Esc", Style::default().fg(Color::Cyan)),
         Span::raw(": Back  "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(": Inspect  "),
+        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
         Span::styled("r", Style::default().fg(Color::Cyan)),
         Span::raw(": Refresh"),
     ]));

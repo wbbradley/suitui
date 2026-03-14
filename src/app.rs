@@ -33,7 +33,15 @@ struct DynFieldsCacheEntry {
 use crate::{
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
-    object_fetcher::{self, DynFieldInfo, DynFieldsFetchResult, ObjectData, ObjectFetchResult},
+    object_fetcher::{
+        self,
+        DynFieldInfo,
+        DynFieldKind,
+        DynFieldsFetchResult,
+        ObjectData,
+        ObjectFetchResult,
+        OwnerInfo,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +125,7 @@ pub struct App {
     chain_id_tx: mpsc::UnboundedSender<ChainIdResult>,
     pub chain_id_rx: mpsc::UnboundedReceiver<ChainIdResult>,
 
+    pub inspector_sel: usize,
     pub object_state: ObjectState,
     pub dyn_fields_state: DynFieldsState,
     object_cache: HashMap<(Address, String), ObjectCacheEntry>,
@@ -186,6 +195,7 @@ impl App {
             chain_id_fetch_pending: None,
             chain_id_tx,
             chain_id_rx,
+            inspector_sel: 0,
             object_state: ObjectState::Idle,
             dyn_fields_state: DynFieldsState::Idle,
             object_cache: HashMap::new(),
@@ -229,6 +239,30 @@ impl App {
     pub fn active_env_info(&self) -> Option<&Env> {
         let env_name = self.active_env.as_ref()?;
         self.envs.iter().find(|e| e.alias == *env_name)
+    }
+
+    pub fn inspector_links(&self) -> Vec<Address> {
+        let mut links = Vec::new();
+        let ObjectState::Loaded(data) = &self.object_state else {
+            return links;
+        };
+        match &data.owner {
+            OwnerInfo::Address(a) | OwnerInfo::Object(a) => {
+                if let Ok(addr) = a.parse::<Address>() {
+                    links.push(addr);
+                }
+            }
+            _ => {}
+        }
+        if let DynFieldsState::Loaded(fields) = &self.dyn_fields_state {
+            for f in fields {
+                if let Some(id) = &f.child_id
+                    && let Ok(addr) = id.parse::<Address>() {
+                        links.push(addr);
+                    }
+            }
+        }
+        links
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
@@ -377,6 +411,18 @@ impl App {
                 self.pop_view();
                 AppAction::Redraw
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_inspector_selection(-1);
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_inspector_selection(1);
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.inspect_selected_link();
+                AppAction::Redraw
+            }
             KeyCode::Char('r') => {
                 self.force_refresh_object();
                 AppAction::Redraw
@@ -393,12 +439,30 @@ impl App {
             return;
         };
         let key = (addr, env.rpc.clone());
+        self.inspector_sel = 0;
         self.object_cache.remove(&key);
         self.object_inflight = None;
         self.object_displayed_key = None;
         self.dyn_fields_cache.remove(&key);
         self.dyn_fields_inflight = None;
         self.dyn_fields_displayed_key = None;
+    }
+
+    fn move_inspector_selection(&mut self, delta: i32) {
+        let count = self.inspector_links().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.inspector_sel as i32;
+        self.inspector_sel = (current + delta).rem_euclid(count as i32) as usize;
+    }
+
+    fn inspect_selected_link(&mut self) {
+        let links = self.inspector_links();
+        if let Some(&addr) = links.get(self.inspector_sel) {
+            self.inspector_sel = 0;
+            self.push_view(View::ObjectInspector(addr));
+        }
     }
 
     fn move_account_selection(&mut self, delta: i32) {
@@ -1339,5 +1403,90 @@ mod tests {
         app.object_state = ObjectState::Loaded(ObjectData::empty());
         app.handle_key(key(KeyCode::Char('r')));
         assert!(app.object_displayed_key.is_none());
+    }
+
+    #[test]
+    fn inspector_links_from_loaded_object() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
+        let child_addr = Address::from_bytes([3u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loaded(ObjectData {
+            owner: OwnerInfo::Address(owner_addr.to_string()),
+            ..ObjectData::empty()
+        });
+        app.dyn_fields_state = DynFieldsState::Loaded(vec![
+            DynFieldInfo {
+                field_id: "f1".into(),
+                kind: DynFieldKind::Object,
+                value_type: "SomeType".into(),
+                child_id: Some(child_addr.to_string()),
+            },
+            DynFieldInfo {
+                field_id: "f2".into(),
+                kind: DynFieldKind::Field,
+                value_type: "Other".into(),
+                child_id: None,
+            },
+        ]);
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], owner_addr);
+        assert_eq!(links[1], child_addr);
+    }
+
+    #[test]
+    fn inspector_links_empty_when_not_loaded() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loading;
+        assert!(app.inspector_links().is_empty());
+    }
+
+    #[test]
+    fn move_inspector_selection_wraps() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
+        let child_addr = Address::from_bytes([3u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loaded(ObjectData {
+            owner: OwnerInfo::Address(owner_addr.to_string()),
+            ..ObjectData::empty()
+        });
+        app.dyn_fields_state = DynFieldsState::Loaded(vec![DynFieldInfo {
+            field_id: "f1".into(),
+            kind: DynFieldKind::Object,
+            value_type: "T".into(),
+            child_id: Some(child_addr.to_string()),
+        }]);
+        // 2 links: owner + child
+        assert_eq!(app.inspector_sel, 0);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.inspector_sel, 1);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.inspector_sel, 0); // wrapped
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.inspector_sel, 1); // wrapped backwards
+    }
+
+    #[test]
+    fn enter_on_inspector_link_pushes_view() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loaded(ObjectData {
+            owner: OwnerInfo::Address(owner_addr.to_string()),
+            ..ObjectData::empty()
+        });
+        app.dyn_fields_state = DynFieldsState::Loaded(vec![]);
+        assert_eq!(app.view_stack.len(), 2);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.view_stack.len(), 3);
+        assert_eq!(app.current_view(), View::ObjectInspector(owner_addr));
+        assert_eq!(app.inspector_sel, 0);
     }
 }
