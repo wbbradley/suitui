@@ -1,4 +1,5 @@
 mod app;
+mod coin_fetcher;
 mod config;
 mod ui;
 
@@ -45,6 +46,8 @@ fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut app::App,
 ) -> Result<()> {
+    app.maybe_trigger_coin_fetch();
+
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -56,6 +59,12 @@ fn run_event_loop(
                 AppAction::Redraw | AppAction::None => {}
             }
         }
+
+        while let Ok(result) = app.coin_rx.try_recv() {
+            app.handle_coin_result(result);
+        }
+
+        app.maybe_trigger_coin_fetch();
 
         if app.should_quit {
             break;

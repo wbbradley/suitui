@@ -1,8 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use sui_types::base_types::SuiAddress;
+use tokio::sync::mpsc;
 
-use crate::config::{Env, WalletData};
+use crate::{
+    coin_fetcher::{CoinBalance, CoinFetchResult},
+    config::{Env, WalletData},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -19,6 +23,13 @@ impl Focus {
             Focus::NetworkInfo => Focus::Accounts,
         }
     }
+}
+
+pub enum CoinState {
+    Idle,
+    Loading,
+    Loaded(Vec<CoinBalance>),
+    Error(String),
 }
 
 pub enum AppAction {
@@ -43,6 +54,11 @@ pub struct App {
     pub env_list_state: ListState,
 
     pub should_quit: bool,
+
+    pub coin_state: CoinState,
+    coin_fetch_key: Option<(SuiAddress, String)>,
+    coin_tx: mpsc::UnboundedSender<CoinFetchResult>,
+    pub coin_rx: mpsc::UnboundedReceiver<CoinFetchResult>,
 }
 
 impl App {
@@ -70,6 +86,8 @@ impl App {
         let mut env_list_state = ListState::default();
         env_list_state.select(Some(env_idx));
 
+        let (coin_tx, coin_rx) = mpsc::unbounded_channel();
+
         App {
             pending_address: data.active_address,
             pending_env: data.active_env.clone(),
@@ -82,6 +100,10 @@ impl App {
             env_dropdown_open: false,
             env_list_state,
             should_quit: false,
+            coin_state: CoinState::Idle,
+            coin_fetch_key: None,
+            coin_tx,
+            coin_rx,
         }
     }
 
@@ -193,6 +215,37 @@ impl App {
     fn apply_pending(&mut self) {
         self.active_address = self.pending_address;
         self.active_env = self.pending_env.clone();
+        self.coin_fetch_key = None;
+    }
+
+    pub fn maybe_trigger_coin_fetch(&mut self) {
+        let Some(addr) = self.selected_account_address() else {
+            self.coin_state = CoinState::Idle;
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.coin_state = CoinState::Idle;
+            return;
+        };
+        let rpc_url = env.rpc.clone();
+        let key = (addr, rpc_url.clone());
+        if self.coin_fetch_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.coin_fetch_key = Some(key);
+        self.coin_state = CoinState::Loading;
+        crate::coin_fetcher::spawn_fetch(addr, rpc_url, self.coin_tx.clone());
+    }
+
+    pub fn handle_coin_result(&mut self, result: CoinFetchResult) {
+        let key = (result.address, result.rpc_url);
+        if self.coin_fetch_key.as_ref() != Some(&key) {
+            return;
+        }
+        match result.outcome {
+            Ok(balances) => self.coin_state = CoinState::Loaded(balances),
+            Err(msg) => self.coin_state = CoinState::Error(msg),
+        }
     }
 }
 
@@ -467,5 +520,74 @@ mod tests {
         app.env_dropdown_open = true;
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Up));
+    }
+
+    #[tokio::test]
+    async fn coin_fetch_no_env_stays_idle() {
+        let (mut data, _) = test_wallet_data();
+        data.active_env = None;
+        let mut app = App::new(data);
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Idle));
+    }
+
+    #[tokio::test]
+    async fn coin_fetch_triggers_loading() {
+        let (mut app, _) = test_app();
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Loading));
+        assert!(app.coin_fetch_key.is_some());
+    }
+
+    #[tokio::test]
+    async fn coin_fetch_idempotent() {
+        let (mut app, _) = test_app();
+        app.maybe_trigger_coin_fetch();
+        let key1 = app.coin_fetch_key.clone();
+        app.maybe_trigger_coin_fetch();
+        assert_eq!(app.coin_fetch_key, key1);
+    }
+
+    #[tokio::test]
+    async fn apply_pending_clears_coin_fetch_key() {
+        let (mut app, _) = test_app();
+        app.maybe_trigger_coin_fetch();
+        assert!(app.coin_fetch_key.is_some());
+        app.handle_key(key(KeyCode::F(10)));
+        assert!(app.coin_fetch_key.is_none());
+    }
+
+    #[test]
+    fn handle_coin_result_accepts_matching() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.coin_fetch_key = Some((addrs[1], rpc_url.clone()));
+        app.coin_state = CoinState::Loading;
+
+        app.handle_coin_result(CoinFetchResult {
+            address: addrs[1],
+            rpc_url,
+            outcome: Ok(vec![CoinBalance {
+                coin_type: "0x2::sui::SUI".into(),
+                total_balance: 1_000_000_000,
+            }]),
+        });
+        assert!(matches!(app.coin_state, CoinState::Loaded(ref b) if b.len() == 1));
+    }
+
+    #[test]
+    fn handle_coin_result_discards_stale() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.coin_fetch_key = Some((addrs[1], rpc_url.clone()));
+        app.coin_state = CoinState::Loading;
+
+        // Result for a different address — should be discarded
+        app.handle_coin_result(CoinFetchResult {
+            address: addrs[0],
+            rpc_url,
+            outcome: Ok(vec![]),
+        });
+        assert!(matches!(app.coin_state, CoinState::Loading));
     }
 }

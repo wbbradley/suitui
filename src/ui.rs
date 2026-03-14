@@ -3,10 +3,13 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table},
 };
 
-use crate::app::{App, Focus};
+use crate::{
+    app::{App, CoinState, Focus},
+    coin_fetcher::{format_balance, short_coin_type},
+};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
@@ -96,8 +99,52 @@ fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus, Focus::Coins));
 
-    let content = Paragraph::new("  (Phase 2)").block(block);
-    frame.render_widget(content, area);
+    match &app.coin_state {
+        CoinState::Idle => {
+            let p = Paragraph::new("  Select an account and environment")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block);
+            frame.render_widget(p, area);
+        }
+        CoinState::Loading => {
+            let p = Paragraph::new("  Loading balances...")
+                .style(Style::default().fg(Color::Yellow))
+                .block(block);
+            frame.render_widget(p, area);
+        }
+        CoinState::Error(msg) => {
+            let p = Paragraph::new(format!("  Error: {msg}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block);
+            frame.render_widget(p, area);
+        }
+        CoinState::Loaded(balances) => {
+            if balances.is_empty() {
+                let p = Paragraph::new("  No coins found")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .block(block);
+                frame.render_widget(p, area);
+            } else {
+                let rows: Vec<Row> = balances
+                    .iter()
+                    .map(|b| {
+                        Row::new(vec![
+                            short_coin_type(&b.coin_type).to_string(),
+                            format_balance(b.total_balance, 9),
+                        ])
+                    })
+                    .collect();
+                let widths = [Constraint::Percentage(40), Constraint::Percentage(60)];
+                let table = Table::new(rows, widths)
+                    .header(
+                        Row::new(vec!["Coin", "Balance"])
+                            .style(Style::default().add_modifier(Modifier::BOLD)),
+                    )
+                    .block(block);
+                frame.render_widget(table, area);
+            }
+        }
+    }
 }
 
 fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
