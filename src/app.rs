@@ -10,6 +10,7 @@ use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
 const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
+const OBJECT_CACHE_TTL: Duration = Duration::from_secs(300);
 
 struct CoinCacheEntry {
     balances: Vec<CoinBalance>,
@@ -17,9 +18,22 @@ struct CoinCacheEntry {
     fetched_at: Instant,
 }
 
+struct ObjectCacheEntry {
+    data: ObjectData,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
+struct DynFieldsCacheEntry {
+    fields: Vec<DynFieldInfo>,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
 use crate::{
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
+    object_fetcher::{self, DynFieldInfo, DynFieldsFetchResult, ObjectData, ObjectFetchResult},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +57,20 @@ pub enum CoinState {
     Idle,
     Loading,
     Loaded(Vec<CoinBalance>),
+    Error(String),
+}
+
+pub enum ObjectState {
+    Idle,
+    Loading,
+    Loaded(ObjectData),
+    Error(String),
+}
+
+pub enum DynFieldsState {
+    Idle,
+    Loading,
+    Loaded(Vec<DynFieldInfo>),
     Error(String),
 }
 
@@ -88,6 +116,19 @@ pub struct App {
     pub chain_id_fetch_pending: Option<String>,
     chain_id_tx: mpsc::UnboundedSender<ChainIdResult>,
     pub chain_id_rx: mpsc::UnboundedReceiver<ChainIdResult>,
+
+    pub object_state: ObjectState,
+    pub dyn_fields_state: DynFieldsState,
+    object_cache: HashMap<(Address, String), ObjectCacheEntry>,
+    object_inflight: Option<(Address, String)>,
+    object_displayed_key: Option<(Address, String)>,
+    object_tx: mpsc::UnboundedSender<ObjectFetchResult>,
+    pub object_rx: mpsc::UnboundedReceiver<ObjectFetchResult>,
+    dyn_fields_cache: HashMap<(Address, String), DynFieldsCacheEntry>,
+    dyn_fields_inflight: Option<(Address, String)>,
+    dyn_fields_displayed_key: Option<(Address, String)>,
+    dyn_fields_tx: mpsc::UnboundedSender<DynFieldsFetchResult>,
+    pub dyn_fields_rx: mpsc::UnboundedReceiver<DynFieldsFetchResult>,
 }
 
 impl App {
@@ -117,6 +158,8 @@ impl App {
 
         let (coin_tx, coin_rx) = mpsc::unbounded_channel();
         let (chain_id_tx, chain_id_rx) = mpsc::unbounded_channel();
+        let (object_tx, object_rx) = mpsc::unbounded_channel();
+        let (dyn_fields_tx, dyn_fields_rx) = mpsc::unbounded_channel();
 
         App {
             view_stack: vec![View::Main],
@@ -143,6 +186,18 @@ impl App {
             chain_id_fetch_pending: None,
             chain_id_tx,
             chain_id_rx,
+            object_state: ObjectState::Idle,
+            dyn_fields_state: DynFieldsState::Idle,
+            object_cache: HashMap::new(),
+            object_inflight: None,
+            object_displayed_key: None,
+            object_tx,
+            object_rx,
+            dyn_fields_cache: HashMap::new(),
+            dyn_fields_inflight: None,
+            dyn_fields_displayed_key: None,
+            dyn_fields_tx,
+            dyn_fields_rx,
         }
     }
 
@@ -443,6 +498,131 @@ impl App {
             self.coin_cache.remove(&key);
             self.coin_inflight = None;
             self.coin_displayed_key = None;
+        }
+    }
+
+    pub fn maybe_trigger_object_fetch(&mut self) {
+        let View::ObjectInspector(addr) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.object_state = ObjectState::Idle;
+            self.object_displayed_key = None;
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        if self.object_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.object_cache.get(&key)
+            && entry.fetched_at.elapsed() < OBJECT_CACHE_TTL
+        {
+            self.object_state = if let Some(msg) = &entry.error {
+                ObjectState::Error(msg.clone())
+            } else {
+                ObjectState::Loaded(entry.data.clone())
+            };
+            self.object_displayed_key = Some(key);
+            return;
+        }
+        if self.object_inflight.as_ref() == Some(&key) {
+            self.object_state = ObjectState::Loading;
+            self.object_displayed_key = Some(key);
+            return;
+        }
+        self.object_inflight = Some(key.clone());
+        self.object_displayed_key = Some(key.clone());
+        self.object_state = ObjectState::Loading;
+        self.dyn_fields_state = DynFieldsState::Idle;
+        self.dyn_fields_displayed_key = None;
+        object_fetcher::spawn_object_fetch(addr, key.1, self.object_tx.clone());
+    }
+
+    pub fn handle_object_result(&mut self, result: ObjectFetchResult) {
+        let key = (result.object_id, result.rpc_url);
+        if self.object_inflight.as_ref() == Some(&key) {
+            self.object_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(data) => ObjectCacheEntry {
+                data: data.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => ObjectCacheEntry {
+                data: ObjectData::empty(),
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.object_cache.insert(key.clone(), entry);
+        if self.object_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(data) => self.object_state = ObjectState::Loaded(data),
+                Err(msg) => self.object_state = ObjectState::Error(msg),
+            }
+        }
+    }
+
+    pub fn maybe_trigger_dyn_fields_fetch(&mut self) {
+        let View::ObjectInspector(addr) = self.current_view() else {
+            return;
+        };
+        if !matches!(self.object_state, ObjectState::Loaded(_)) {
+            return;
+        }
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        if self.dyn_fields_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.dyn_fields_cache.get(&key)
+            && entry.fetched_at.elapsed() < OBJECT_CACHE_TTL
+        {
+            self.dyn_fields_state = if let Some(msg) = &entry.error {
+                DynFieldsState::Error(msg.clone())
+            } else {
+                DynFieldsState::Loaded(entry.fields.clone())
+            };
+            self.dyn_fields_displayed_key = Some(key);
+            return;
+        }
+        if self.dyn_fields_inflight.as_ref() == Some(&key) {
+            self.dyn_fields_state = DynFieldsState::Loading;
+            self.dyn_fields_displayed_key = Some(key);
+            return;
+        }
+        self.dyn_fields_inflight = Some(key.clone());
+        self.dyn_fields_displayed_key = Some(key.clone());
+        self.dyn_fields_state = DynFieldsState::Loading;
+        object_fetcher::spawn_dyn_fields_fetch(addr, key.1, self.dyn_fields_tx.clone());
+    }
+
+    pub fn handle_dyn_fields_result(&mut self, result: DynFieldsFetchResult) {
+        let key = (result.parent_id, result.rpc_url);
+        if self.dyn_fields_inflight.as_ref() == Some(&key) {
+            self.dyn_fields_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(fields) => DynFieldsCacheEntry {
+                fields: fields.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => DynFieldsCacheEntry {
+                fields: vec![],
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.dyn_fields_cache.insert(key.clone(), entry);
+        if self.dyn_fields_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(fields) => self.dyn_fields_state = DynFieldsState::Loaded(fields),
+                Err(msg) => self.dyn_fields_state = DynFieldsState::Error(msg),
+            }
         }
     }
 }
@@ -1044,5 +1224,87 @@ mod tests {
         app.push_view(View::ObjectInspector(addr));
         app.handle_key(key(KeyCode::Char('q')));
         assert_eq!(app.current_view(), View::Main);
+    }
+
+    #[tokio::test]
+    async fn object_inspector_triggers_fetch() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.maybe_trigger_object_fetch();
+        assert!(matches!(app.object_state, ObjectState::Loading));
+        assert!(app.object_inflight.is_some());
+    }
+
+    #[test]
+    fn object_fetch_not_triggered_on_main() {
+        let (mut app, _) = test_app();
+        app.maybe_trigger_object_fetch();
+        assert!(matches!(app.object_state, ObjectState::Idle));
+    }
+
+    #[tokio::test]
+    async fn object_fetch_idempotent() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.maybe_trigger_object_fetch();
+        let key1 = app.object_inflight.clone();
+        app.maybe_trigger_object_fetch();
+        assert_eq!(app.object_inflight, key1);
+    }
+
+    #[test]
+    fn handle_object_result_updates_state() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_inflight = Some((addr, rpc_url.clone()));
+        app.object_displayed_key = Some((addr, rpc_url.clone()));
+        app.object_state = ObjectState::Loading;
+
+        app.handle_object_result(ObjectFetchResult {
+            object_id: addr,
+            rpc_url,
+            outcome: Ok(ObjectData::empty()),
+        });
+        assert!(matches!(app.object_state, ObjectState::Loaded(_)));
+    }
+
+    #[test]
+    fn handle_object_result_error() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.object_displayed_key = Some((addr, rpc_url.clone()));
+        app.object_state = ObjectState::Loading;
+
+        app.handle_object_result(ObjectFetchResult {
+            object_id: addr,
+            rpc_url,
+            outcome: Err("not found".into()),
+        });
+        assert!(matches!(app.object_state, ObjectState::Error(_)));
+    }
+
+    #[test]
+    fn dyn_fields_not_triggered_when_object_not_loaded() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loading;
+        app.maybe_trigger_dyn_fields_fetch();
+        assert!(matches!(app.dyn_fields_state, DynFieldsState::Idle));
+    }
+
+    #[tokio::test]
+    async fn dyn_fields_triggered_when_object_loaded() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.object_state = ObjectState::Loaded(ObjectData::empty());
+        app.maybe_trigger_dyn_fields_fetch();
+        assert!(matches!(app.dyn_fields_state, DynFieldsState::Loading));
     }
 }

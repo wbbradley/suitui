@@ -8,14 +8,14 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, Focus, View},
+    app::{App, CoinState, Focus, ObjectState, View},
     coin_fetcher::{format_balance, short_coin_type},
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.current_view() {
         View::Main => draw_main(frame, app),
-        View::ObjectInspector(addr) => draw_object_inspector(frame, addr),
+        View::ObjectInspector(addr) => draw_object_inspector(frame, app, addr),
     }
 }
 
@@ -326,18 +326,27 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(help, help_area);
 }
 
-fn draw_object_inspector(frame: &mut Frame, addr: Address) {
+fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
     let block = Block::default()
         .title(format!("Object Inspector: {}", addr))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let help =
-        Paragraph::new("  Press Esc or q to go back\n\n  (Object fetching not yet implemented)")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-
-    frame.render_widget(help, frame.area());
+    let text = match &app.object_state {
+        ObjectState::Idle => "  Waiting...".to_string(),
+        ObjectState::Loading => "  Loading object...".to_string(),
+        ObjectState::Error(msg) => format!("  Error: {msg}"),
+        ObjectState::Loaded(data) => format!(
+            "  Type: {}\n  Version: {}\n  Digest: {}\n\n  Press Esc or q to go back",
+            data.object_type, data.version, data.digest
+        ),
+    };
+    let style = match &app.object_state {
+        ObjectState::Error(_) => Style::default().fg(Color::Red),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+    let p = Paragraph::new(text).style(style).block(block);
+    frame.render_widget(p, frame.area());
 }
 
 #[cfg(test)]

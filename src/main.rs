@@ -1,6 +1,7 @@
 mod app;
 mod coin_fetcher;
 mod config;
+mod object_fetcher;
 mod ui;
 
 use std::{io, path::PathBuf, time::Duration};
@@ -80,9 +81,17 @@ fn run_event_loop(
         while let Ok(result) = app.chain_id_rx.try_recv() {
             app.handle_chain_id_result(result);
         }
+        while let Ok(result) = app.object_rx.try_recv() {
+            app.handle_object_result(result);
+        }
+        while let Ok(result) = app.dyn_fields_rx.try_recv() {
+            app.handle_dyn_fields_result(result);
+        }
 
         app.maybe_trigger_coin_fetch();
         app.maybe_trigger_chain_id_fetch();
+        app.maybe_trigger_object_fetch();
+        app.maybe_trigger_dyn_fields_fetch();
 
         if app.should_quit {
             break;

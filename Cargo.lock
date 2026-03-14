@@ -1885,6 +1885,7 @@ dependencies = [
  "crossterm",
  "futures",
  "home",
+ "prost-types",
  "ratatui",
  "serde",
  "serde_json",
