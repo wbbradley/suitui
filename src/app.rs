@@ -46,6 +46,11 @@ pub enum CoinState {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Main,
+}
+
 pub enum AppAction {
     Quit,
     Redraw,
@@ -53,6 +58,7 @@ pub enum AppAction {
 }
 
 pub struct App {
+    pub view_stack: Vec<View>,
     pub accounts: Vec<(Address, String)>,
     pub envs: Vec<Env>,
 
@@ -109,6 +115,7 @@ impl App {
         let (chain_id_tx, chain_id_rx) = mpsc::unbounded_channel();
 
         App {
+            view_stack: vec![View::Main],
             active_address: data.active_address,
             active_env: data.active_env,
             config_path: data.config_path,
@@ -132,6 +139,24 @@ impl App {
         }
     }
 
+    pub fn current_view(&self) -> View {
+        *self.view_stack.last().expect("view stack is empty")
+    }
+
+    pub fn push_view(&mut self, view: View) {
+        self.view_stack.push(view);
+    }
+
+    pub fn pop_view(&mut self) -> bool {
+        if self.view_stack.len() > 1 {
+            self.view_stack.pop();
+            true
+        } else {
+            self.should_quit = true;
+            false
+        }
+    }
+
     pub fn selected_account_address(&self) -> Option<Address> {
         self.account_list_state
             .selected()
@@ -149,14 +174,19 @@ impl App {
             self.should_quit = true;
             return AppAction::Quit;
         }
+        match self.current_view() {
+            View::Main => self.handle_main_key(key),
+        }
+    }
 
+    fn handle_main_key(&mut self, key: KeyEvent) -> AppAction {
         if self.env_dropdown_open {
             return self.handle_env_dropdown_key(key);
         }
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.should_quit = true;
+                self.pop_view();
                 AppAction::Quit
             }
             KeyCode::Tab => {
@@ -842,5 +872,31 @@ mod tests {
         });
         assert!(app.chain_id_fetch_pending.is_none());
         assert_eq!(app.chain_id_cache.get(&rpc_url).unwrap(), "35834a8a");
+    }
+
+    #[test]
+    fn view_stack_starts_with_main() {
+        let (app, _) = test_app();
+        assert_eq!(app.current_view(), View::Main);
+        assert_eq!(app.view_stack.len(), 1);
+    }
+
+    #[test]
+    fn pop_view_on_single_view_quits() {
+        let (mut app, _) = test_app();
+        let continuing = app.pop_view();
+        assert!(!continuing);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn push_and_pop_view() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Main);
+        assert_eq!(app.view_stack.len(), 2);
+        let continuing = app.pop_view();
+        assert!(continuing);
+        assert!(!app.should_quit);
+        assert_eq!(app.view_stack.len(), 1);
     }
 }

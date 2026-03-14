@@ -8,11 +8,17 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, Focus},
+    app::{App, CoinState, Focus, View},
     coin_fetcher::{format_balance, short_coin_type},
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    match app.current_view() {
+        View::Main => draw_main(frame, app),
+    }
+}
+
+fn draw_main(frame: &mut Frame, app: &mut App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
 
     let main_area = outer[0];
