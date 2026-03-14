@@ -2,6 +2,12 @@
 name = "suitui"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal UI for managing your Sui wallet"
+license = "MIT"
+repository = "https://github.com/wbbradley/suitui"
+readme = "README.md"
+keywords = ["sui", "wallet", "tui", "blockchain"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 sui-sdk = { git = "https://github.com/MystenLabs/sui", tag = "testnet-v1.67.2" }
