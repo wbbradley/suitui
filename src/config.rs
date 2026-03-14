@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use sui_config::Config;
 use sui_keys::keystore::Alias;
-use sui_sdk::wallet_context::WalletContext;
+use sui_sdk::{sui_client_config::SuiClientConfig, wallet_context::WalletContext};
 use sui_types::base_types::SuiAddress;
 
 #[derive(Clone, Debug)]
@@ -31,6 +32,23 @@ pub struct WalletData {
 pub fn default_config_path() -> Result<PathBuf> {
     let home = home::home_dir().context("could not determine home directory")?;
     Ok(home.join(".sui/sui_config/client.yaml"))
+}
+
+pub fn save_active_state(
+    config_path: &Path,
+    active_address: Option<SuiAddress>,
+    active_env: Option<&str>,
+) {
+    let result: Result<()> = (|| {
+        let mut config = SuiClientConfig::load_with_lock(config_path)?;
+        config.active_address = active_address;
+        config.active_env = active_env.map(String::from);
+        config.save_with_lock(config_path)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        eprintln!("warning: failed to save config: {e}");
+    }
 }
 
 pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
@@ -71,4 +89,39 @@ pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
         active_env,
         config_path: config_path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use sui_keys::keystore::{FileBasedKeystore, Keystore};
+    use sui_sdk::sui_client_config::SuiClientConfig;
+
+    use super::*;
+
+    #[test]
+    fn save_active_state_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore_path = dir.path().join("test.keystore");
+        let config_path = dir.path().join("client.yaml");
+
+        let keystore = Keystore::from(FileBasedKeystore::load_or_create(&keystore_path).unwrap());
+        let config = SuiClientConfig::new(keystore);
+        config.save(&config_path).unwrap();
+
+        let addr = SuiAddress::random_for_testing_only();
+        save_active_state(&config_path, Some(addr), Some("testnet"));
+
+        let reloaded = SuiClientConfig::load(&config_path).unwrap();
+        assert_eq!(reloaded.active_address, Some(addr));
+        assert_eq!(reloaded.active_env.as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn save_active_state_missing_file_no_panic() {
+        save_active_state(
+            Path::new("/nonexistent/path/client.yaml"),
+            None,
+            Some("testnet"),
+        );
+    }
 }

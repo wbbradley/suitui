@@ -14,4 +14,5 @@
 
 ## Understanding sui gRPC api
 
-Read the .proto files in the MystenLabs/sui-rust-sdk repo under crates/sui-rpc/vendored/proto/sui/rpc/v2.
+Read the .proto files in the MystenLabs/sui-rust-sdk repo under
+crates/sui-rpc/vendored/proto/sui/rpc/v2 (typically in ../sui-rust-sdk).

@@ -7977,6 +7977,7 @@ dependencies = [
  "sui-rpc 0.2.2 (git+https://github.com/MystenLabs/sui-rust-sdk.git)",
  "sui-sdk",
  "sui-types",
+ "tempfile",
  "tokio",
 ]
 

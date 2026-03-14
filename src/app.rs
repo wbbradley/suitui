@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -46,6 +46,7 @@ pub struct App {
 
     pub active_address: Option<SuiAddress>,
     pub active_env: Option<String>,
+    pub config_path: PathBuf,
 
     pub focus: Focus,
     pub account_list_state: TableState,
@@ -96,6 +97,7 @@ impl App {
         App {
             active_address: data.active_address,
             active_env: data.active_env,
+            config_path: data.config_path,
             accounts,
             envs: data.envs,
             focus: Focus::Accounts,
@@ -165,6 +167,11 @@ impl App {
                 if self.focus == Focus::Accounts {
                     self.active_address = self.selected_account_address();
                     self.coin_fetch_key = None;
+                    crate::config::save_active_state(
+                        &self.config_path,
+                        self.active_address,
+                        self.active_env.as_deref(),
+                    );
                 }
                 AppAction::Redraw
             }
@@ -194,6 +201,11 @@ impl App {
                 }
                 self.env_dropdown_open = false;
                 self.coin_fetch_key = None;
+                crate::config::save_active_state(
+                    &self.config_path,
+                    self.active_address,
+                    self.active_env.as_deref(),
+                );
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -246,7 +258,7 @@ impl App {
     }
 
     pub fn maybe_trigger_coin_fetch(&mut self) {
-        let Some(addr) = self.active_address else {
+        let Some(addr) = self.selected_account_address() else {
             self.coin_state = CoinState::Idle;
             return;
         };
@@ -539,6 +551,21 @@ mod tests {
         assert!(matches!(app.coin_state, CoinState::Loading));
         let (_, rpc_url) = app.coin_fetch_key.as_ref().unwrap();
         assert_eq!(rpc_url, "https://devnet.example.com");
+    }
+
+    #[tokio::test]
+    async fn coin_fetch_uses_selected_account() {
+        let (mut app, addrs) = test_app();
+        // Cursor starts on bob (index 1), move to carol (index 2)
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_account_address(), Some(addrs[2]));
+        // active_address is still bob
+        assert_eq!(app.active_address, Some(addrs[1]));
+        // Coin fetch should use carol (selected), not bob (active)
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Loading));
+        let (fetch_addr, _) = app.coin_fetch_key.as_ref().unwrap();
+        assert_eq!(*fetch_addr, addrs[2]);
     }
 
     #[tokio::test]

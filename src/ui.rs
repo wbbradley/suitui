@@ -82,7 +82,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
     let addr_label = app
-        .active_address
+        .selected_account_address()
         .and_then(|a| {
             app.accounts
                 .iter()
