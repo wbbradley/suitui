@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table},
 };
-use sui_types::base_types::SuiAddress;
+use sui_sdk_types::Address;
 
 use crate::{
     app::{App, CoinState, Focus},
@@ -42,7 +42,7 @@ fn border_style(focus: Focus, pane: Focus) -> Style {
     }
 }
 
-fn short_address(addr: &SuiAddress) -> String {
+fn short_address(addr: &Address) -> String {
     let s = addr.to_string();
     if s.len() > 12 {
         format!("{}...{}", &s[..6], &s[s.len() - 4..])
@@ -161,7 +161,7 @@ fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn alias_for(app: &App, addr: Option<SuiAddress>) -> Option<&str> {
+fn alias_for(app: &App, addr: Option<Address>) -> Option<&str> {
     let addr = addr?;
     app.accounts
         .iter()
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn short_address_truncates() {
-        let addr = SuiAddress::random_for_testing_only();
+        let addr = Address::from_bytes([7u8; 32]).unwrap();
         let full = addr.to_string();
         let short = short_address(&addr);
         assert_eq!(short.len(), 13); // "0xABCD...EF12"

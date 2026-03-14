@@ -4,11 +4,11 @@ use anyhow::{Context, Result};
 use sui_config::Config;
 use sui_keys::keystore::Alias;
 use sui_sdk::{sui_client_config::SuiClientConfig, wallet_context::WalletContext};
-use sui_types::base_types::SuiAddress;
+use sui_sdk_types::Address;
 
 #[derive(Clone, Debug)]
 pub struct Account {
-    pub address: SuiAddress,
+    pub address: Address,
     pub alias: String,
 }
 
@@ -24,7 +24,7 @@ pub struct Env {
 pub struct WalletData {
     pub accounts: Vec<Account>,
     pub envs: Vec<Env>,
-    pub active_address: Option<SuiAddress>,
+    pub active_address: Option<Address>,
     pub active_env: Option<String>,
     pub config_path: PathBuf,
 }
@@ -36,12 +36,13 @@ pub fn default_config_path() -> Result<PathBuf> {
 
 pub fn save_active_state(
     config_path: &Path,
-    active_address: Option<SuiAddress>,
+    active_address: Option<Address>,
     active_env: Option<&str>,
 ) {
     let result: Result<()> = (|| {
         let mut config = SuiClientConfig::load_with_lock(config_path)?;
-        config.active_address = active_address;
+        config.active_address =
+            active_address.map(|a| a.to_string().parse().expect("valid sui address"));
         config.active_env = active_env.map(String::from);
         config.save_with_lock(config_path)?;
         Ok(())
@@ -62,10 +63,12 @@ pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
     let accounts: Vec<Account> = wallet
         .addresses_with_alias()
         .into_iter()
-        .map(|(addr, alias): (&SuiAddress, &Alias)| Account {
-            address: *addr,
-            alias: alias.alias.clone(),
-        })
+        .map(
+            |(addr, alias): (&sui_types::base_types::SuiAddress, &Alias)| Account {
+                address: addr.to_string().parse().expect("valid sui address"),
+                alias: alias.alias.clone(),
+            },
+        )
         .collect();
 
     let envs: Vec<Env> = wallet
@@ -79,7 +82,10 @@ pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
         })
         .collect();
 
-    let active_address = wallet.active_address().ok();
+    let active_address = wallet
+        .active_address()
+        .ok()
+        .map(|a| a.to_string().parse().expect("valid sui address"));
     let active_env = wallet.config.active_env.clone();
 
     Ok(WalletData {
@@ -108,11 +114,14 @@ mod tests {
         let config = SuiClientConfig::new(keystore);
         config.save(&config_path).unwrap();
 
-        let addr = SuiAddress::random_for_testing_only();
+        let addr = Address::from_bytes([7u8; 32]).unwrap();
         save_active_state(&config_path, Some(addr), Some("testnet"));
 
         let reloaded = SuiClientConfig::load(&config_path).unwrap();
-        assert_eq!(reloaded.active_address, Some(addr));
+        let reloaded_addr: Option<Address> = reloaded
+            .active_address
+            .map(|a| a.to_string().parse().expect("valid sui address"));
+        assert_eq!(reloaded_addr, Some(addr));
         assert_eq!(reloaded.active_env.as_deref(), Some("testnet"));
     }
 

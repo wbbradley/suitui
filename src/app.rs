@@ -6,7 +6,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
-use sui_types::base_types::SuiAddress;
+use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
 const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -53,10 +53,10 @@ pub enum AppAction {
 }
 
 pub struct App {
-    pub accounts: Vec<(SuiAddress, String)>,
+    pub accounts: Vec<(Address, String)>,
     pub envs: Vec<Env>,
 
-    pub active_address: Option<SuiAddress>,
+    pub active_address: Option<Address>,
     pub active_env: Option<String>,
     pub config_path: PathBuf,
 
@@ -68,9 +68,9 @@ pub struct App {
     pub should_quit: bool,
 
     pub coin_state: CoinState,
-    coin_cache: HashMap<(SuiAddress, String), CoinCacheEntry>,
-    coin_inflight: Option<(SuiAddress, String)>,
-    coin_displayed_key: Option<(SuiAddress, String)>,
+    coin_cache: HashMap<(Address, String), CoinCacheEntry>,
+    coin_inflight: Option<(Address, String)>,
+    coin_displayed_key: Option<(Address, String)>,
     coin_tx: mpsc::UnboundedSender<CoinFetchResult>,
     pub coin_rx: mpsc::UnboundedReceiver<CoinFetchResult>,
 
@@ -82,7 +82,7 @@ pub struct App {
 
 impl App {
     pub fn new(data: WalletData) -> Self {
-        let accounts: Vec<(SuiAddress, String)> = data
+        let accounts: Vec<(Address, String)> = data
             .accounts
             .into_iter()
             .map(|a| (a.address, a.alias))
@@ -132,7 +132,7 @@ impl App {
         }
     }
 
-    pub fn selected_account_address(&self) -> Option<SuiAddress> {
+    pub fn selected_account_address(&self) -> Option<Address> {
         self.account_list_state
             .selected()
             .and_then(|i| self.accounts.get(i))
@@ -252,7 +252,7 @@ impl App {
         self.env_list_state.select(Some(next));
     }
 
-    fn current_coin_key(&self) -> Option<(SuiAddress, String)> {
+    fn current_coin_key(&self) -> Option<(Address, String)> {
         let addr = self.selected_account_address()?;
         let env = self.active_env_info()?;
         Some((addr, env.rpc.clone()))
@@ -296,15 +296,16 @@ impl App {
         }
         // Check cache
         if let Some(entry) = self.coin_cache.get(&key)
-            && entry.fetched_at.elapsed() < COIN_CACHE_TTL {
-                self.coin_state = if let Some(msg) = &entry.error {
-                    CoinState::Error(msg.clone())
-                } else {
-                    CoinState::Loaded(entry.balances.clone())
-                };
-                self.coin_displayed_key = Some(key);
-                return;
-            }
+            && entry.fetched_at.elapsed() < COIN_CACHE_TTL
+        {
+            self.coin_state = if let Some(msg) = &entry.error {
+                CoinState::Error(msg.clone())
+            } else {
+                CoinState::Loaded(entry.balances.clone())
+            };
+            self.coin_displayed_key = Some(key);
+            return;
+        }
         // Check inflight
         if self.coin_inflight.as_ref() == Some(&key) {
             self.coin_state = CoinState::Loading;
@@ -365,11 +366,11 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn test_wallet_data() -> (WalletData, [SuiAddress; 3]) {
+    fn test_wallet_data() -> (WalletData, [Address; 3]) {
         let addrs = [
-            SuiAddress::random_for_testing_only(),
-            SuiAddress::random_for_testing_only(),
-            SuiAddress::random_for_testing_only(),
+            Address::from_bytes([1u8; 32]).unwrap(),
+            Address::from_bytes([2u8; 32]).unwrap(),
+            Address::from_bytes([3u8; 32]).unwrap(),
         ];
         let data = WalletData {
             accounts: vec![
@@ -410,7 +411,7 @@ mod tests {
         (data, addrs)
     }
 
-    fn test_app() -> (App, [SuiAddress; 3]) {
+    fn test_app() -> (App, [Address; 3]) {
         let (data, addrs) = test_wallet_data();
         (App::new(data), addrs)
     }

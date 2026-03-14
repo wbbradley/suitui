@@ -3,7 +3,7 @@ use sui_rpc::{
     Client,
     proto::sui::rpc::v2::{GetServiceInfoRequest, ListBalancesRequest},
 };
-use sui_types::base_types::SuiAddress;
+use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -13,7 +13,7 @@ pub struct CoinBalance {
 }
 
 pub struct CoinFetchResult {
-    pub address: SuiAddress,
+    pub address: Address,
     pub rpc_url: String,
     pub outcome: Result<Vec<CoinBalance>, String>,
 }
@@ -62,11 +62,7 @@ async fn fetch_chain_id(rpc_url: &str) -> Result<String, String> {
         .ok_or_else(|| "chain_id not returned".into())
 }
 
-pub fn spawn_fetch(
-    address: SuiAddress,
-    rpc_url: String,
-    tx: mpsc::UnboundedSender<CoinFetchResult>,
-) {
+pub fn spawn_fetch(address: Address, rpc_url: String, tx: mpsc::UnboundedSender<CoinFetchResult>) {
     let rpc_url_clone = rpc_url.clone();
     tokio::spawn(async move {
         let outcome = fetch_balances(&address, &rpc_url_clone).await;
@@ -78,7 +74,7 @@ pub fn spawn_fetch(
     });
 }
 
-async fn fetch_balances(address: &SuiAddress, rpc_url: &str) -> Result<Vec<CoinBalance>, String> {
+async fn fetch_balances(address: &Address, rpc_url: &str) -> Result<Vec<CoinBalance>, String> {
     let client = Client::new(rpc_url).map_err(|e| e.to_string())?;
     let request = ListBalancesRequest::const_default()
         .with_owner(address.to_string())
