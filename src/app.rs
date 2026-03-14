@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use sui_types::base_types::SuiAddress;
 use tokio::sync::mpsc;
 
 use crate::{
-    coin_fetcher::{CoinBalance, CoinFetchResult},
+    coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
 };
 
@@ -56,6 +58,11 @@ pub struct App {
     coin_fetch_key: Option<(SuiAddress, String)>,
     coin_tx: mpsc::UnboundedSender<CoinFetchResult>,
     pub coin_rx: mpsc::UnboundedReceiver<CoinFetchResult>,
+
+    pub chain_id_cache: HashMap<String, String>,
+    pub chain_id_fetch_pending: Option<String>,
+    chain_id_tx: mpsc::UnboundedSender<ChainIdResult>,
+    pub chain_id_rx: mpsc::UnboundedReceiver<ChainIdResult>,
 }
 
 impl App {
@@ -84,6 +91,7 @@ impl App {
         env_list_state.select(Some(env_idx));
 
         let (coin_tx, coin_rx) = mpsc::unbounded_channel();
+        let (chain_id_tx, chain_id_rx) = mpsc::unbounded_channel();
 
         App {
             active_address: data.active_address,
@@ -99,6 +107,10 @@ impl App {
             coin_fetch_key: None,
             coin_tx,
             coin_rx,
+            chain_id_cache: HashMap::new(),
+            chain_id_fetch_pending: None,
+            chain_id_tx,
+            chain_id_rx,
         }
     }
 
@@ -204,6 +216,33 @@ impl App {
         let current = self.env_list_state.selected().unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(self.envs.len() as i32) as usize;
         self.env_list_state.select(Some(next));
+    }
+
+    pub fn maybe_trigger_chain_id_fetch(&mut self) {
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        if env.chain_id.is_some() {
+            return;
+        }
+        let rpc_url = env.rpc.clone();
+        if self.chain_id_cache.contains_key(&rpc_url) {
+            return;
+        }
+        if self.chain_id_fetch_pending.as_ref() == Some(&rpc_url) {
+            return;
+        }
+        self.chain_id_fetch_pending = Some(rpc_url.clone());
+        coin_fetcher::spawn_chain_id_fetch(rpc_url, self.chain_id_tx.clone());
+    }
+
+    pub fn handle_chain_id_result(&mut self, result: ChainIdResult) {
+        if self.chain_id_fetch_pending.as_ref() == Some(&result.rpc_url) {
+            self.chain_id_fetch_pending = None;
+        }
+        if let Ok(chain_id) = result.outcome {
+            self.chain_id_cache.insert(result.rpc_url, chain_id);
+        }
     }
 
     pub fn maybe_trigger_coin_fetch(&mut self) {
@@ -572,5 +611,64 @@ mod tests {
             outcome: Ok(vec![]),
         });
         assert!(matches!(app.coin_state, CoinState::Loading));
+    }
+
+    #[test]
+    fn chain_id_fetch_skipped_when_config_has_it() {
+        let (mut app, _) = test_app();
+        // testnet has chain_id: Some("bbb")
+        app.active_env = Some("testnet".into());
+        app.maybe_trigger_chain_id_fetch();
+        assert!(app.chain_id_fetch_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn chain_id_fetch_triggered_when_missing() {
+        let (mut app, _) = test_app();
+        // mainnet has chain_id: None
+        app.active_env = Some("mainnet".into());
+        app.maybe_trigger_chain_id_fetch();
+        assert_eq!(
+            app.chain_id_fetch_pending.as_deref(),
+            Some("https://mainnet.example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_id_fetch_idempotent() {
+        let (mut app, _) = test_app();
+        app.active_env = Some("mainnet".into());
+        app.maybe_trigger_chain_id_fetch();
+        assert!(app.chain_id_fetch_pending.is_some());
+        // Second call should not re-trigger
+        app.maybe_trigger_chain_id_fetch();
+        assert_eq!(
+            app.chain_id_fetch_pending.as_deref(),
+            Some("https://mainnet.example.com")
+        );
+    }
+
+    #[test]
+    fn chain_id_cache_hit() {
+        let (mut app, _) = test_app();
+        app.active_env = Some("mainnet".into());
+        app.chain_id_cache
+            .insert("https://mainnet.example.com".into(), "35834a8a".into());
+        app.maybe_trigger_chain_id_fetch();
+        assert!(app.chain_id_fetch_pending.is_none());
+    }
+
+    #[test]
+    fn handle_chain_id_result_populates_cache() {
+        let (mut app, _) = test_app();
+        let rpc_url = "https://mainnet.example.com".to_string();
+        app.chain_id_fetch_pending = Some(rpc_url.clone());
+
+        app.handle_chain_id_result(ChainIdResult {
+            rpc_url: rpc_url.clone(),
+            outcome: Ok("35834a8a".into()),
+        });
+        assert!(app.chain_id_fetch_pending.is_none());
+        assert_eq!(app.chain_id_cache.get(&rpc_url).unwrap(), "35834a8a");
     }
 }

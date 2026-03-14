@@ -11,3 +11,7 @@
 - Visual elements should be greyed out when their data is stale (e.g., after network error or env
   switch). This is punted to vNext — don't over-invest in staleness handling in v1 beyond basic
   graceful error display.
+
+## Understanding sui gRPC api
+
+Read the .proto files in the MystenLabs/sui-rust-sdk repo under crates/sui-rpc/vendored/proto/sui/rpc/v2.

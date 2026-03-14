@@ -171,9 +171,18 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("RPC:     ", label_style),
             Span::raw(env.rpc.clone()),
         ]));
+        let chain_display = env
+            .chain_id
+            .as_deref()
+            .or_else(|| app.chain_id_cache.get(&env.rpc).map(|s| s.as_str()))
+            .unwrap_or(if app.chain_id_fetch_pending.as_ref() == Some(&env.rpc) {
+                "fetching..."
+            } else {
+                "unknown"
+            });
         lines.push(Line::from(vec![
             Span::styled("Chain:   ", label_style),
-            Span::raw(env.chain_id.as_deref().unwrap_or("unknown").to_string()),
+            Span::raw(chain_display.to_string()),
         ]));
     } else {
         lines.push(Line::from(Span::styled(

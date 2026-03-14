@@ -60,6 +60,7 @@ fn run_event_loop(
     app: &mut app::App,
 ) -> Result<()> {
     app.maybe_trigger_coin_fetch();
+    app.maybe_trigger_chain_id_fetch();
 
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -76,8 +77,12 @@ fn run_event_loop(
         while let Ok(result) = app.coin_rx.try_recv() {
             app.handle_coin_result(result);
         }
+        while let Ok(result) = app.chain_id_rx.try_recv() {
+            app.handle_chain_id_result(result);
+        }
 
         app.maybe_trigger_coin_fetch();
+        app.maybe_trigger_chain_id_fetch();
 
         if app.should_quit {
             break;

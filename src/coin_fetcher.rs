@@ -1,5 +1,8 @@
 use futures::StreamExt;
-use sui_rpc::{Client, proto::sui::rpc::v2::ListBalancesRequest};
+use sui_rpc::{
+    Client,
+    proto::sui::rpc::v2::{GetServiceInfoRequest, ListBalancesRequest},
+};
 use sui_types::base_types::SuiAddress;
 use tokio::sync::mpsc;
 
@@ -31,6 +34,31 @@ pub fn format_balance(raw: u64, decimals: u32) -> String {
 
 pub fn short_coin_type(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
+}
+
+pub struct ChainIdResult {
+    pub rpc_url: String,
+    pub outcome: Result<String, String>,
+}
+
+pub fn spawn_chain_id_fetch(rpc_url: String, tx: mpsc::UnboundedSender<ChainIdResult>) {
+    let rpc_url_clone = rpc_url.clone();
+    tokio::spawn(async move {
+        let outcome = fetch_chain_id(&rpc_url_clone).await;
+        let _ = tx.send(ChainIdResult { rpc_url, outcome });
+    });
+}
+
+async fn fetch_chain_id(rpc_url: &str) -> Result<String, String> {
+    let mut client = Client::new(rpc_url).map_err(|e| e.to_string())?;
+    let resp = client
+        .ledger_client()
+        .get_service_info(GetServiceInfoRequest::default())
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.into_inner()
+        .chain_id
+        .ok_or_else(|| "chain_id not returned".into())
 }
 
 pub fn spawn_fetch(
