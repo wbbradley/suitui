@@ -42,6 +42,15 @@ fn border_style(focus: Focus, pane: Focus) -> Style {
     }
 }
 
+fn short_address(addr: &SuiAddress) -> String {
+    let s = addr.to_string();
+    if s.len() > 12 {
+        format!("{}...{}", &s[..6], &s[s.len() - 4..])
+    } else {
+        s
+    }
+}
+
 fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
     let env_label = app.active_env.as_deref().unwrap_or("none");
     let title = format!("Accounts  [Env: {}]", env_label);
@@ -59,13 +68,21 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "  "
             };
-            Row::new(vec![marker.to_string(), alias.clone(), addr.to_string()])
+            Row::new(vec![marker.to_string(), alias.clone(), short_address(addr)])
         })
         .collect();
 
+    let max_alias = app
+        .accounts
+        .iter()
+        .map(|(_, alias)| alias.len() as u16)
+        .max()
+        .unwrap_or(12)
+        .max(5);
+
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(12),
+        Constraint::Length(max_alias),
         Constraint::Min(0),
     ];
     let table = Table::new(rows, widths)
@@ -254,4 +271,20 @@ fn draw_env_dropdown(frame: &mut Frame, app: &mut App, anchor: Rect) {
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, dropdown_area, &mut app.env_list_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_address_truncates() {
+        let addr = SuiAddress::random_for_testing_only();
+        let full = addr.to_string();
+        let short = short_address(&addr);
+        assert_eq!(short.len(), 13); // "0xABCD...EF12"
+        assert!(short.starts_with(&full[..6]));
+        assert!(short.ends_with(&full[full.len() - 4..]));
+        assert!(short.contains("..."));
+    }
 }
