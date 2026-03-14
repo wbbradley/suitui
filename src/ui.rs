@@ -155,7 +155,7 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines = Vec::new();
 
-    if let Some(env) = app.active_env_info() {
+    if let Some(env) = app.pending_env_info() {
         lines.push(Line::from(vec![
             Span::styled("RPC: ", Style::default().fg(Color::Gray)),
             Span::raw(&env.rpc),

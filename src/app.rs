@@ -123,6 +123,11 @@ impl App {
         self.envs.iter().find(|e| e.alias == *env_name)
     }
 
+    pub fn pending_env_info(&self) -> Option<&Env> {
+        let env_name = self.pending_env.as_ref()?;
+        self.envs.iter().find(|e| e.alias == *env_name)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -187,6 +192,7 @@ impl App {
                     self.pending_env = Some(env.alias.clone());
                 }
                 self.env_dropdown_open = false;
+                self.coin_fetch_key = None;
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -223,7 +229,7 @@ impl App {
             self.coin_state = CoinState::Idle;
             return;
         };
-        let Some(env) = self.active_env_info() else {
+        let Some(env) = self.pending_env_info() else {
             self.coin_state = CoinState::Idle;
             return;
         };
@@ -468,6 +474,8 @@ mod tests {
         assert_eq!(app.pending_env.as_deref(), Some("devnet"));
         assert!(app.has_pending_changes());
         assert_eq!(app.active_env.as_deref(), Some("testnet"));
+        assert_eq!(app.pending_env_info().unwrap().alias, "devnet");
+        assert!(app.coin_fetch_key.is_none());
     }
 
     #[test]
@@ -527,8 +535,20 @@ mod tests {
         let (mut data, _) = test_wallet_data();
         data.active_env = None;
         let mut app = App::new(data);
+        app.pending_env = None;
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Idle));
+    }
+
+    #[tokio::test]
+    async fn coin_fetch_uses_pending_env() {
+        let (mut app, _) = test_app();
+        // Switch pending env to devnet (active is still testnet)
+        app.pending_env = Some("devnet".into());
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Loading));
+        let (_, rpc_url) = app.coin_fetch_key.as_ref().unwrap();
+        assert_eq!(rpc_url, "https://devnet.example.com");
     }
 
     #[tokio::test]
