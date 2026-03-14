@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
 const OBJECT_CACHE_TTL: Duration = Duration::from_secs(300);
+const TX_HISTORY_CACHE_TTL: Duration = Duration::from_secs(300);
 
 struct CoinCacheEntry {
     balances: Vec<CoinBalance>,
@@ -30,6 +31,12 @@ struct DynFieldsCacheEntry {
     fetched_at: Instant,
 }
 
+struct TxHistoryCacheEntry {
+    transactions: Vec<TransactionSummary>,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
 use crate::{
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
@@ -41,6 +48,7 @@ use crate::{
         ObjectFetchResult,
         OwnerInfo,
     },
+    transaction_fetcher::{self, TransactionSummary, TxHistoryFetchResult},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +89,18 @@ pub enum DynFieldsState {
     Error(String),
 }
 
+pub enum TxHistoryState {
+    Idle,
+    Loading,
+    Loaded(Vec<TransactionSummary>),
+    Error(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Main,
     ObjectInspector(Address),
+    TransactionHistory(Address),
 }
 
 pub enum AppAction {
@@ -137,6 +153,14 @@ pub struct App {
     dyn_fields_displayed_key: Option<(Address, String)>,
     dyn_fields_tx: mpsc::UnboundedSender<DynFieldsFetchResult>,
     pub dyn_fields_rx: mpsc::UnboundedReceiver<DynFieldsFetchResult>,
+
+    pub tx_history_state: TxHistoryState,
+    pub tx_history_table_state: TableState,
+    tx_history_cache: HashMap<(Address, String), TxHistoryCacheEntry>,
+    tx_history_inflight: Option<(Address, String)>,
+    tx_history_displayed_key: Option<(Address, String)>,
+    tx_history_tx: mpsc::UnboundedSender<TxHistoryFetchResult>,
+    pub tx_history_rx: mpsc::UnboundedReceiver<TxHistoryFetchResult>,
 }
 
 impl App {
@@ -168,6 +192,7 @@ impl App {
         let (chain_id_tx, chain_id_rx) = mpsc::unbounded_channel();
         let (object_tx, object_rx) = mpsc::unbounded_channel();
         let (dyn_fields_tx, dyn_fields_rx) = mpsc::unbounded_channel();
+        let (tx_history_tx, tx_history_rx) = mpsc::unbounded_channel();
 
         App {
             view_stack: vec![View::Main],
@@ -207,6 +232,13 @@ impl App {
             dyn_fields_displayed_key: None,
             dyn_fields_tx,
             dyn_fields_rx,
+            tx_history_state: TxHistoryState::Idle,
+            tx_history_table_state: TableState::default(),
+            tx_history_cache: HashMap::new(),
+            tx_history_inflight: None,
+            tx_history_displayed_key: None,
+            tx_history_tx,
+            tx_history_rx,
         }
     }
 
@@ -273,6 +305,7 @@ impl App {
         match self.current_view() {
             View::Main => self.handle_main_key(key),
             View::ObjectInspector(_) => self.handle_object_inspector_key(key),
+            View::TransactionHistory(_) => self.handle_tx_history_key(key),
         }
     }
 
@@ -330,6 +363,13 @@ impl App {
             KeyCode::Char('r') => {
                 if self.focus == Focus::Accounts || self.focus == Focus::Coins {
                     self.force_refresh_coins();
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char('t') => {
+                if let Some(addr) = self.active_address {
+                    self.tx_history_table_state.select(Some(0));
+                    self.push_view(View::TransactionHistory(addr));
                 }
                 AppAction::Redraw
             }
@@ -706,6 +746,120 @@ impl App {
             match result.outcome {
                 Ok(fields) => self.dyn_fields_state = DynFieldsState::Loaded(fields),
                 Err(msg) => self.dyn_fields_state = DynFieldsState::Error(msg),
+            }
+        }
+    }
+
+    fn handle_tx_history_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pop_view();
+                AppAction::Redraw
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_tx_history_selection(-1);
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_tx_history_selection(1);
+                AppAction::Redraw
+            }
+            KeyCode::Char('r') => {
+                self.force_refresh_tx_history();
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn move_tx_history_selection(&mut self, delta: i32) {
+        let TxHistoryState::Loaded(txs) = &self.tx_history_state else {
+            return;
+        };
+        if txs.is_empty() {
+            return;
+        }
+        let current = self.tx_history_table_state.selected().unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(txs.len() as i32) as usize;
+        self.tx_history_table_state.select(Some(next));
+    }
+
+    fn force_refresh_tx_history(&mut self) {
+        let View::TransactionHistory(addr) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        self.tx_history_cache.remove(&key);
+        self.tx_history_inflight = None;
+        self.tx_history_displayed_key = None;
+        self.tx_history_table_state.select(Some(0));
+    }
+
+    pub fn maybe_trigger_tx_history_fetch(&mut self) {
+        let View::TransactionHistory(addr) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.tx_history_state = TxHistoryState::Idle;
+            self.tx_history_displayed_key = None;
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        if self.tx_history_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.tx_history_cache.get(&key)
+            && entry.fetched_at.elapsed() < TX_HISTORY_CACHE_TTL
+        {
+            self.tx_history_state = if let Some(msg) = &entry.error {
+                TxHistoryState::Error(msg.clone())
+            } else {
+                TxHistoryState::Loaded(entry.transactions.clone())
+            };
+            self.tx_history_displayed_key = Some(key);
+            return;
+        }
+        if self.tx_history_inflight.as_ref() == Some(&key) {
+            self.tx_history_state = TxHistoryState::Loading;
+            self.tx_history_displayed_key = Some(key);
+            return;
+        }
+        self.tx_history_inflight = Some(key.clone());
+        self.tx_history_displayed_key = Some(key.clone());
+        self.tx_history_state = TxHistoryState::Loading;
+        transaction_fetcher::spawn_tx_history_fetch(addr, key.1, self.tx_history_tx.clone());
+    }
+
+    pub fn handle_tx_history_result(&mut self, result: TxHistoryFetchResult) {
+        let key = (result.address, result.rpc_url);
+        if self.tx_history_inflight.as_ref() == Some(&key) {
+            self.tx_history_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(txs) => TxHistoryCacheEntry {
+                transactions: txs.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => TxHistoryCacheEntry {
+                transactions: vec![],
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.tx_history_cache.insert(key.clone(), entry);
+        if self.tx_history_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(txs) => {
+                    if !txs.is_empty() {
+                        self.tx_history_table_state.select(Some(0));
+                    }
+                    self.tx_history_state = TxHistoryState::Loaded(txs);
+                }
+                Err(msg) => self.tx_history_state = TxHistoryState::Error(msg),
             }
         }
     }

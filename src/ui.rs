@@ -8,15 +8,17 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, DynFieldsState, Focus, ObjectState, View},
+    app::{App, CoinState, DynFieldsState, Focus, ObjectState, TxHistoryState, View},
     coin_fetcher::{format_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
+    transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.current_view() {
         View::Main => draw_main(frame, app),
         View::ObjectInspector(addr) => draw_object_inspector(frame, app, addr),
+        View::TransactionHistory(addr) => draw_transaction_history(frame, app, addr),
     }
 }
 
@@ -243,6 +245,8 @@ fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
         Span::raw(": Env  "),
         Span::styled("i", Style::default().fg(Color::Cyan)),
         Span::raw(": Inspect  "),
+        Span::styled("t", Style::default().fg(Color::Cyan)),
+        Span::raw(": Tx History  "),
         Span::styled("r", Style::default().fg(Color::Cyan)),
         Span::raw(": Refresh"),
     ]));
@@ -599,6 +603,146 @@ fn draw_inspector_help_bar(frame: &mut Frame, area: Rect) {
         Span::raw(": Refresh"),
     ]));
     frame.render_widget(help, area);
+}
+
+fn draw_transaction_history(frame: &mut Frame, app: &mut App, addr: Address) {
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+    let content_area = outer[0];
+    let help_area = outer[1];
+
+    let alias = alias_for(app, Some(addr)).unwrap_or("unknown");
+    let block = Block::default()
+        .title(format!("Transaction History: {}", alias))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    // Extract state info before mutably borrowing app for table rendering
+    enum TxDisplay {
+        Message(String, Color),
+        Table(Vec<TransactionSummary>),
+    }
+    let display = match &app.tx_history_state {
+        TxHistoryState::Idle => TxDisplay::Message("Waiting...".into(), Color::Yellow),
+        TxHistoryState::Loading => {
+            TxDisplay::Message("Loading transactions...".into(), Color::Yellow)
+        }
+        TxHistoryState::Error(msg) => TxDisplay::Message(format!("Error: {msg}"), Color::Red),
+        TxHistoryState::Loaded(txs) if txs.is_empty() => {
+            TxDisplay::Message("No transactions found".into(), Color::DarkGray)
+        }
+        TxHistoryState::Loaded(txs) => TxDisplay::Table(txs.clone()),
+    };
+    match display {
+        TxDisplay::Message(msg, color) => {
+            let p = Paragraph::new(format!("  {msg}"))
+                .style(Style::default().fg(color))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        TxDisplay::Table(txs) => {
+            draw_tx_table(frame, app, &txs, block, content_area);
+        }
+    }
+
+    draw_tx_history_help_bar(frame, help_area);
+}
+
+fn draw_tx_table(
+    frame: &mut Frame,
+    app: &mut App,
+    txs: &[TransactionSummary],
+    block: Block,
+    area: Rect,
+) {
+    let rows: Vec<Row> = txs
+        .iter()
+        .map(|tx| {
+            let digest = short_digest(&tx.digest);
+            let time = tx
+                .timestamp
+                .as_ref()
+                .map(transaction_fetcher::format_timestamp)
+                .unwrap_or_else(|| "?".into());
+            let status = match tx.success {
+                Some(true) => "OK".to_string(),
+                Some(false) => "FAIL".to_string(),
+                None => "?".to_string(),
+            };
+            let gas = tx
+                .gas_used
+                .as_ref()
+                .map(|g| {
+                    let total = g.computation_cost.saturating_add(g.storage_cost);
+                    let net = total.saturating_sub(g.storage_rebate);
+                    format_balance(net, 9)
+                })
+                .unwrap_or_else(|| "?".into());
+            let changes = format_balance_changes(&tx.balance_changes);
+            Row::new(vec![digest, time, status, gas, changes])
+        })
+        .collect();
+
+    let header = Row::new(vec!["Digest", "Time", "Status", "Gas", "Balance Changes"])
+        .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let widths = [
+        Constraint::Length(13),
+        Constraint::Length(16),
+        Constraint::Length(6),
+        Constraint::Length(12),
+        Constraint::Min(0),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(table, area, &mut app.tx_history_table_state);
+}
+
+fn draw_tx_history_help_bar(frame: &mut Frame, area: Rect) {
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::raw(": Back  "),
+        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::raw(": Navigate  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": Refresh"),
+    ]));
+    frame.render_widget(help, area);
+}
+
+fn short_digest(digest: &str) -> String {
+    if digest.len() > 12 {
+        format!("{}...{}", &digest[..6], &digest[digest.len() - 4..])
+    } else {
+        digest.to_string()
+    }
+}
+
+fn format_balance_changes(changes: &[TxBalanceChange]) -> String {
+    if changes.is_empty() {
+        return "\u{2014}".into();
+    }
+    let parts: Vec<String> = changes
+        .iter()
+        .take(3)
+        .map(|bc| {
+            let coin = short_coin_type(&bc.coin_type);
+            format!("{} {coin}", bc.amount)
+        })
+        .collect();
+    let mut s = parts.join(", ");
+    if changes.len() > 3 {
+        s.push_str(&format!(" +{} more", changes.len() - 3));
+    }
+    s
 }
 
 #[cfg(test)]
