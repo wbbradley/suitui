@@ -6,6 +6,7 @@ use sui_rpc::{
 use sui_types::base_types::SuiAddress;
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
 pub struct CoinBalance {
     pub coin_type: String,
     pub total_balance: u64,

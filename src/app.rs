@@ -1,9 +1,21 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use sui_types::base_types::SuiAddress;
 use tokio::sync::mpsc;
+
+const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
+
+struct CoinCacheEntry {
+    balances: Vec<CoinBalance>,
+    error: Option<String>,
+    fetched_at: Instant,
+}
 
 use crate::{
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
@@ -56,7 +68,9 @@ pub struct App {
     pub should_quit: bool,
 
     pub coin_state: CoinState,
-    coin_fetch_key: Option<(SuiAddress, String)>,
+    coin_cache: HashMap<(SuiAddress, String), CoinCacheEntry>,
+    coin_inflight: Option<(SuiAddress, String)>,
+    coin_displayed_key: Option<(SuiAddress, String)>,
     coin_tx: mpsc::UnboundedSender<CoinFetchResult>,
     pub coin_rx: mpsc::UnboundedReceiver<CoinFetchResult>,
 
@@ -106,7 +120,9 @@ impl App {
             env_list_state,
             should_quit: false,
             coin_state: CoinState::Idle,
-            coin_fetch_key: None,
+            coin_cache: HashMap::new(),
+            coin_inflight: None,
+            coin_displayed_key: None,
             coin_tx,
             coin_rx,
             chain_id_cache: HashMap::new(),
@@ -166,12 +182,18 @@ impl App {
             KeyCode::Enter => {
                 if self.focus == Focus::Accounts {
                     self.active_address = self.selected_account_address();
-                    self.coin_fetch_key = None;
+                    self.coin_displayed_key = None;
                     crate::config::save_active_state(
                         &self.config_path,
                         self.active_address,
                         self.active_env.as_deref(),
                     );
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char('r') => {
+                if self.focus == Focus::Accounts || self.focus == Focus::Coins {
+                    self.force_refresh_coins();
                 }
                 AppAction::Redraw
             }
@@ -200,7 +222,7 @@ impl App {
                     self.active_env = Some(env.alias.clone());
                 }
                 self.env_dropdown_open = false;
-                self.coin_fetch_key = None;
+                self.coin_displayed_key = None;
                 crate::config::save_active_state(
                     &self.config_path,
                     self.active_address,
@@ -228,6 +250,12 @@ impl App {
         let current = self.env_list_state.selected().unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(self.envs.len() as i32) as usize;
         self.env_list_state.select(Some(next));
+    }
+
+    fn current_coin_key(&self) -> Option<(SuiAddress, String)> {
+        let addr = self.selected_account_address()?;
+        let env = self.active_env_info()?;
+        Some((addr, env.rpc.clone()))
     }
 
     pub fn maybe_trigger_chain_id_fetch(&mut self) {
@@ -258,32 +286,70 @@ impl App {
     }
 
     pub fn maybe_trigger_coin_fetch(&mut self) {
-        let Some(addr) = self.selected_account_address() else {
+        let Some(key) = self.current_coin_key() else {
             self.coin_state = CoinState::Idle;
+            self.coin_displayed_key = None;
             return;
         };
-        let Some(env) = self.active_env_info() else {
-            self.coin_state = CoinState::Idle;
-            return;
-        };
-        let rpc_url = env.rpc.clone();
-        let key = (addr, rpc_url.clone());
-        if self.coin_fetch_key.as_ref() == Some(&key) {
+        if self.coin_displayed_key.as_ref() == Some(&key) {
+            return; // already showing this key
+        }
+        // Check cache
+        if let Some(entry) = self.coin_cache.get(&key)
+            && entry.fetched_at.elapsed() < COIN_CACHE_TTL {
+                self.coin_state = if let Some(msg) = &entry.error {
+                    CoinState::Error(msg.clone())
+                } else {
+                    CoinState::Loaded(entry.balances.clone())
+                };
+                self.coin_displayed_key = Some(key);
+                return;
+            }
+        // Check inflight
+        if self.coin_inflight.as_ref() == Some(&key) {
+            self.coin_state = CoinState::Loading;
+            self.coin_displayed_key = Some(key);
             return;
         }
-        self.coin_fetch_key = Some(key);
+        // Spawn fetch
+        self.coin_inflight = Some(key.clone());
+        self.coin_displayed_key = Some(key.clone());
         self.coin_state = CoinState::Loading;
-        crate::coin_fetcher::spawn_fetch(addr, rpc_url, self.coin_tx.clone());
+        crate::coin_fetcher::spawn_fetch(key.0, key.1, self.coin_tx.clone());
     }
 
     pub fn handle_coin_result(&mut self, result: CoinFetchResult) {
         let key = (result.address, result.rpc_url);
-        if self.coin_fetch_key.as_ref() != Some(&key) {
-            return;
+        if self.coin_inflight.as_ref() == Some(&key) {
+            self.coin_inflight = None;
         }
-        match result.outcome {
-            Ok(balances) => self.coin_state = CoinState::Loaded(balances),
-            Err(msg) => self.coin_state = CoinState::Error(msg),
+        let entry = match &result.outcome {
+            Ok(balances) => CoinCacheEntry {
+                balances: balances.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => CoinCacheEntry {
+                balances: vec![],
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.coin_cache.insert(key.clone(), entry);
+        // Update display if this result matches what we're currently viewing
+        if self.coin_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(balances) => self.coin_state = CoinState::Loaded(balances),
+                Err(msg) => self.coin_state = CoinState::Error(msg),
+            }
+        }
+    }
+
+    fn force_refresh_coins(&mut self) {
+        if let Some(key) = self.current_coin_key() {
+            self.coin_cache.remove(&key);
+            self.coin_inflight = None;
+            self.coin_displayed_key = None;
         }
     }
 }
@@ -495,7 +561,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert!(!app.env_dropdown_open);
         assert_eq!(app.active_env.as_deref(), Some("devnet"));
-        assert!(app.coin_fetch_key.is_none());
+        assert!(app.coin_displayed_key.is_none());
     }
 
     #[test]
@@ -549,7 +615,7 @@ mod tests {
         app.active_env = Some("devnet".into());
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Loading));
-        let (_, rpc_url) = app.coin_fetch_key.as_ref().unwrap();
+        let (_, rpc_url) = app.coin_inflight.as_ref().unwrap();
         assert_eq!(rpc_url, "https://devnet.example.com");
     }
 
@@ -564,7 +630,7 @@ mod tests {
         // Coin fetch should use carol (selected), not bob (active)
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Loading));
-        let (fetch_addr, _) = app.coin_fetch_key.as_ref().unwrap();
+        let (fetch_addr, _) = app.coin_inflight.as_ref().unwrap();
         assert_eq!(*fetch_addr, addrs[2]);
     }
 
@@ -573,16 +639,16 @@ mod tests {
         let (mut app, _) = test_app();
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Loading));
-        assert!(app.coin_fetch_key.is_some());
+        assert!(app.coin_inflight.is_some());
     }
 
     #[tokio::test]
     async fn coin_fetch_idempotent() {
         let (mut app, _) = test_app();
         app.maybe_trigger_coin_fetch();
-        let key1 = app.coin_fetch_key.clone();
+        let key1 = app.coin_inflight.clone();
         app.maybe_trigger_coin_fetch();
-        assert_eq!(app.coin_fetch_key, key1);
+        assert_eq!(app.coin_inflight, key1);
     }
 
     #[test]
@@ -610,7 +676,8 @@ mod tests {
     fn handle_coin_result_accepts_matching() {
         let (mut app, addrs) = test_app();
         let rpc_url = "https://testnet.example.com".to_string();
-        app.coin_fetch_key = Some((addrs[1], rpc_url.clone()));
+        app.coin_inflight = Some((addrs[1], rpc_url.clone()));
+        app.coin_displayed_key = Some((addrs[1], rpc_url.clone()));
         app.coin_state = CoinState::Loading;
 
         app.handle_coin_result(CoinFetchResult {
@@ -628,7 +695,8 @@ mod tests {
     fn handle_coin_result_discards_stale() {
         let (mut app, addrs) = test_app();
         let rpc_url = "https://testnet.example.com".to_string();
-        app.coin_fetch_key = Some((addrs[1], rpc_url.clone()));
+        app.coin_inflight = Some((addrs[1], rpc_url.clone()));
+        app.coin_displayed_key = Some((addrs[1], rpc_url.clone()));
         app.coin_state = CoinState::Loading;
 
         // Result for a different address — should be discarded
@@ -683,6 +751,82 @@ mod tests {
             .insert("https://mainnet.example.com".into(), "35834a8a".into());
         app.maybe_trigger_chain_id_fetch();
         assert!(app.chain_id_fetch_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn coin_cache_hit_skips_fetch() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let coin_key = (addrs[1], rpc_url.clone());
+        app.coin_cache.insert(
+            coin_key,
+            CoinCacheEntry {
+                balances: vec![CoinBalance {
+                    coin_type: "0x2::sui::SUI".into(),
+                    total_balance: 42,
+                }],
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Loaded(ref b) if b.len() == 1));
+        assert!(app.coin_inflight.is_none());
+    }
+
+    #[tokio::test]
+    async fn coin_cache_expired_triggers_fetch() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let coin_key = (addrs[1], rpc_url.clone());
+        app.coin_cache.insert(
+            coin_key,
+            CoinCacheEntry {
+                balances: vec![],
+                error: None,
+                fetched_at: Instant::now() - Duration::from_secs(301),
+            },
+        );
+        app.maybe_trigger_coin_fetch();
+        assert!(matches!(app.coin_state, CoinState::Loading));
+        assert!(app.coin_inflight.is_some());
+    }
+
+    #[test]
+    fn force_refresh_evicts_cache() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let coin_key = (addrs[1], rpc_url.clone());
+        app.coin_cache.insert(
+            coin_key.clone(),
+            CoinCacheEntry {
+                balances: vec![],
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.coin_displayed_key = Some(coin_key.clone());
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(!app.coin_cache.contains_key(&coin_key));
+        assert!(app.coin_displayed_key.is_none());
+    }
+
+    #[test]
+    fn r_key_ignored_in_network_info_focus() {
+        let (mut app, addrs) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let coin_key = (addrs[1], rpc_url.clone());
+        app.coin_cache.insert(
+            coin_key.clone(),
+            CoinCacheEntry {
+                balances: vec![],
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.focus = Focus::NetworkInfo;
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(app.coin_cache.contains_key(&coin_key));
     }
 
     #[test]

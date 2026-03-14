@@ -229,7 +229,9 @@ fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
         Span::styled("Tab", Style::default().fg(Color::Cyan)),
         Span::raw(": Switch pane  "),
         Span::styled("e", Style::default().fg(Color::Cyan)),
-        Span::raw(": Env"),
+        Span::raw(": Env  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": Refresh"),
     ]));
     frame.render_widget(help, area);
 }
