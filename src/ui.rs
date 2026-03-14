@@ -5,11 +5,21 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table},
 };
+use sui_types::base_types::SuiAddress;
 
 use crate::{
     app::{App, CoinState, Focus},
     coin_fetcher::{format_balance, short_coin_type},
 };
+
+fn short_address(addr: &SuiAddress) -> String {
+    let s = format!("{}", addr);
+    if s.len() > 10 {
+        format!("{}...{}", &s[..6], &s[s.len() - 4..])
+    } else {
+        s
+    }
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
@@ -53,12 +63,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
         .accounts
         .iter()
         .map(|(addr, alias)| {
-            let addr_str = format!("{}", addr);
-            let short_addr = if addr_str.len() > 10 {
-                format!("{}...{}", &addr_str[..6], &addr_str[addr_str.len() - 4..])
-            } else {
-                addr_str
-            };
+            let short_addr = short_address(addr);
             let active_marker = if app.active_address == Some(*addr) {
                 " (active)"
             } else {
@@ -84,14 +89,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
     let addr_label = app
         .selected_account_address()
-        .map(|a| {
-            let s = format!("{}", a);
-            if s.len() > 10 {
-                format!("{}...{}", &s[..6], &s[s.len() - 4..])
-            } else {
-                s
-            }
-        })
+        .map(|a| short_address(&a))
         .unwrap_or_else(|| "none".to_string());
 
     let block = Block::default()
@@ -153,29 +151,61 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus, Focus::NetworkInfo));
 
+    let dim = Style::default().fg(Color::DarkGray);
+    let label = Style::default().fg(Color::Gray);
     let mut lines = Vec::new();
 
     if let Some(env) = app.pending_env_info() {
+        let mut env_spans = vec![Span::styled("Env: ", label), Span::raw(env.alias.clone())];
+        if app.pending_env != app.active_env
+            && let Some(active) = &app.active_env {
+                env_spans.push(Span::styled(format!("  (was: {})", active), dim));
+            }
+        lines.push(Line::from(env_spans));
+
         lines.push(Line::from(vec![
-            Span::styled("RPC: ", Style::default().fg(Color::Gray)),
-            Span::raw(&env.rpc),
+            Span::styled("RPC: ", label),
+            Span::raw(env.rpc.clone()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Chain ID: ", Style::default().fg(Color::Gray)),
-            Span::raw(env.chain_id.as_deref().unwrap_or("unknown")),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Env: ", Style::default().fg(Color::Gray)),
-            Span::raw(&env.alias),
+            Span::styled("Chain ID: ", label),
+            Span::raw(env.chain_id.as_deref().unwrap_or("unknown").to_string()),
         ]));
     } else {
         lines.push(Line::from("No active environment"));
     }
 
+    // Account line
+    let selected_addr = app.selected_account_address();
+    let selected_alias = selected_addr.and_then(|a| {
+        app.accounts
+            .iter()
+            .find(|(addr, _)| *addr == a)
+            .map(|(_, alias)| alias.clone())
+    });
+    if let (Some(addr), Some(alias)) = (selected_addr, selected_alias) {
+        let mut acct_spans = vec![
+            Span::styled("Account: ", label),
+            Span::raw(format!("{} ({})", alias, short_address(&addr))),
+        ];
+        if selected_addr != app.active_address {
+            let active_alias = app.active_address.and_then(|a| {
+                app.accounts
+                    .iter()
+                    .find(|(addr, _)| *addr == a)
+                    .map(|(_, alias)| alias.as_str())
+            });
+            if let Some(active_alias) = active_alias {
+                acct_spans.push(Span::styled(format!("  (was: {})", active_alias), dim));
+            }
+        }
+        lines.push(Line::from(acct_spans));
+    }
+
     if app.has_pending_changes() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "* Pending changes (F10)",
+            "Press F10 to apply",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -186,10 +216,18 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
+fn draw_help_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (f10_key_style, f10_desc_style) = if app.has_pending_changes() {
+        (Style::default().fg(Color::Cyan), Style::default())
+    } else {
+        (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("F10", Style::default().fg(Color::Cyan)),
-        Span::raw(": Apply  "),
+        Span::styled("F10", f10_key_style),
+        Span::styled(": Apply  ", f10_desc_style),
         Span::styled("q", Style::default().fg(Color::Cyan)),
         Span::raw(": Quit  "),
         Span::styled("↑↓", Style::default().fg(Color::Cyan)),
