@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+sui-sdk = { git = "https://github.com/MystenLabs/sui", tag = "testnet-v1.67.2" }
+sui-config = { git = "https://github.com/MystenLabs/sui", tag = "testnet-v1.67.2" }
+sui-keys = { git = "https://github.com/MystenLabs/sui", tag = "testnet-v1.67.2" }
+sui-types = { git = "https://github.com/MystenLabs/sui", tag = "testnet-v1.67.2" }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+anyhow = "1.0.102"
+home = "0.5.12"
+tokio = { version = "=1.49.0", features = ["full"] }
