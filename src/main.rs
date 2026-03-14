@@ -3,10 +3,11 @@ mod coin_fetcher;
 mod config;
 mod ui;
 
-use std::{io, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use app::AppAction;
+use clap::Parser;
 use crossterm::{
     ExecutableCommand,
     event::{self, Event},
@@ -14,9 +15,21 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+/// Sui wallet TUI
+#[derive(Parser)]
+struct Args {
+    /// Path to the Sui client config file
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_path = config::default_config_path()?;
+    let args = Args::parse();
+    let config_path = match args.config {
+        Some(path) => path,
+        None => config::default_config_path()?,
+    };
     let wallet_data = config::load_wallet_data(&config_path)?;
     let mut app = app::App::new(wallet_data);
 

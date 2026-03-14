@@ -7967,6 +7967,7 @@ name = "suitui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "crossterm",
  "futures",
  "home",
