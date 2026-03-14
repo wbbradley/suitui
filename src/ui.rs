@@ -8,8 +8,9 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, Focus, ObjectState, View},
+    app::{App, CoinState, DynFieldsState, Focus, ObjectState, View},
     coin_fetcher::{format_balance, short_coin_type},
+    object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -327,26 +328,217 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+    let content_area = outer[0];
+    let help_area = outer[1];
+
     let block = Block::default()
         .title(format!("Object Inspector: {}", addr))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let text = match &app.object_state {
-        ObjectState::Idle => "  Waiting...".to_string(),
-        ObjectState::Loading => "  Loading object...".to_string(),
-        ObjectState::Error(msg) => format!("  Error: {msg}"),
-        ObjectState::Loaded(data) => format!(
-            "  Type: {}\n  Version: {}\n  Digest: {}\n\n  Press Esc or q to go back",
-            data.object_type, data.version, data.digest
-        ),
-    };
-    let style = match &app.object_state {
-        ObjectState::Error(_) => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::DarkGray),
-    };
-    let p = Paragraph::new(text).style(style).block(block);
-    frame.render_widget(p, frame.area());
+    match &app.object_state {
+        ObjectState::Idle | ObjectState::Loading => {
+            let msg = if matches!(app.object_state, ObjectState::Loading) {
+                "Loading object..."
+            } else {
+                "Waiting..."
+            };
+            let p = Paragraph::new(format!("  {msg}"))
+                .style(Style::default().fg(Color::Yellow))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        ObjectState::Error(msg) => {
+            let p = Paragraph::new(format!("  Error: {msg}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        ObjectState::Loaded(data) => {
+            let mut lines = Vec::new();
+            append_metadata_lines(&mut lines, data);
+            append_properties_lines(&mut lines, data);
+            append_dyn_fields_lines(&mut lines, &app.dyn_fields_state);
+
+            let p = Paragraph::new(lines).block(block);
+            frame.render_widget(p, content_area);
+        }
+    }
+
+    draw_inspector_help_bar(frame, help_area);
+}
+
+fn format_owner(owner: &OwnerInfo) -> String {
+    match owner {
+        OwnerInfo::Address(a) => format!("{a} (Address)"),
+        OwnerInfo::Object(a) => format!("{a} (Object)"),
+        OwnerInfo::Shared => "Shared".into(),
+        OwnerInfo::Immutable => "Immutable".into(),
+        OwnerInfo::Unknown => "Unknown".into(),
+    }
+}
+
+fn append_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, data: &ObjectData) {
+    let label = Style::default().fg(Color::Gray);
+
+    lines.push(Line::from(vec![
+        Span::styled("  Type:     ", label),
+        Span::raw(data.object_type.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Version:  ", label),
+        Span::raw(data.version.to_string()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Digest:   ", label),
+        Span::raw(data.digest.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Owner:    ", label),
+        Span::raw(format_owner(&data.owner)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Prev Tx:  ", label),
+        Span::raw(data.previous_transaction.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Rebate:   ", label),
+        Span::raw(data.storage_rebate.to_string()),
+    ]));
+    if let Some(bal) = data.balance {
+        lines.push(Line::from(vec![
+            Span::styled("  Balance:  ", label),
+            Span::raw(bal.to_string()),
+        ]));
+    }
+}
+
+fn append_properties_lines<'a>(lines: &mut Vec<Line<'a>>, data: &ObjectData) {
+    let Some(json) = &data.json else { return };
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  ── Properties ──",
+        Style::default().fg(Color::Cyan),
+    ));
+    render_json_lines(lines, json, 2);
+}
+
+fn render_json_lines(lines: &mut Vec<Line<'_>>, value: &serde_json::Value, indent: usize) {
+    let prefix = " ".repeat(indent);
+    let label_style = Style::default().fg(Color::Gray);
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if v.is_object() || v.is_array() {
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}{k}:"),
+                        label_style,
+                    )));
+                    render_json_lines(lines, v, indent + 2);
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{prefix}{k}: "), label_style),
+                        Span::raw(format_json_scalar(v)),
+                    ]));
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                if v.is_object() || v.is_array() {
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}[{i}]:"),
+                        label_style,
+                    )));
+                    render_json_lines(lines, v, indent + 2);
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{prefix}[{i}]: "), label_style),
+                        Span::raw(format_json_scalar(v)),
+                    ]));
+                }
+            }
+        }
+        other => {
+            lines.push(Line::from(Span::raw(format!(
+                "{prefix}{}",
+                format_json_scalar(other)
+            ))));
+        }
+    }
+}
+
+fn format_json_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("\"{s}\""),
+        serde_json::Value::Null => "null".into(),
+        other => other.to_string(),
+    }
+}
+
+fn append_dyn_fields_lines<'a>(lines: &mut Vec<Line<'a>>, state: &DynFieldsState) {
+    lines.push(Line::raw(""));
+    match state {
+        DynFieldsState::Idle => {}
+        DynFieldsState::Loading => {
+            lines.push(Line::styled(
+                "  ── Dynamic Fields ──",
+                Style::default().fg(Color::Cyan),
+            ));
+            lines.push(Line::styled(
+                "  Loading...",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        DynFieldsState::Error(msg) => {
+            lines.push(Line::styled(
+                "  ── Dynamic Fields ──",
+                Style::default().fg(Color::Cyan),
+            ));
+            lines.push(Line::styled(
+                format!("  Error: {msg}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        DynFieldsState::Loaded(fields) => {
+            lines.push(Line::styled(
+                format!("  ── Dynamic Fields ({}) ──", fields.len()),
+                Style::default().fg(Color::Cyan),
+            ));
+            if fields.is_empty() {
+                lines.push(Line::styled(
+                    "  (none)",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                for f in fields {
+                    let kind_str = match f.kind {
+                        DynFieldKind::Field => "Field ",
+                        DynFieldKind::Object => "Object",
+                        DynFieldKind::Unknown => "???   ",
+                    };
+                    let child = f.child_id.as_deref().unwrap_or("");
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(kind_str, Style::default().fg(Color::Yellow)),
+                        Span::raw(format!("  {}  {}  {}", f.field_id, f.value_type, child)),
+                    ]));
+                }
+            }
+        }
+    }
+}
+
+fn draw_inspector_help_bar(frame: &mut Frame, area: Rect) {
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::raw(": Back  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": Refresh"),
+    ]));
+    frame.render_widget(help, area);
 }
 
 #[cfg(test)]
@@ -362,5 +554,28 @@ mod tests {
         assert!(short.starts_with(&full[..6]));
         assert!(short.ends_with(&full[full.len() - 4..]));
         assert!(short.contains("..."));
+    }
+
+    #[test]
+    fn format_owner_variants() {
+        assert_eq!(
+            format_owner(&OwnerInfo::Address("0xabc".into())),
+            "0xabc (Address)"
+        );
+        assert_eq!(
+            format_owner(&OwnerInfo::Object("0xdef".into())),
+            "0xdef (Object)"
+        );
+        assert_eq!(format_owner(&OwnerInfo::Shared), "Shared");
+        assert_eq!(format_owner(&OwnerInfo::Immutable), "Immutable");
+        assert_eq!(format_owner(&OwnerInfo::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn format_json_scalar_types() {
+        assert_eq!(format_json_scalar(&serde_json::json!("hello")), "\"hello\"");
+        assert_eq!(format_json_scalar(&serde_json::json!(42)), "42");
+        assert_eq!(format_json_scalar(&serde_json::json!(true)), "true");
+        assert_eq!(format_json_scalar(&serde_json::Value::Null), "null");
     }
 }

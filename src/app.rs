@@ -377,8 +377,28 @@ impl App {
                 self.pop_view();
                 AppAction::Redraw
             }
+            KeyCode::Char('r') => {
+                self.force_refresh_object();
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
+    }
+
+    fn force_refresh_object(&mut self) {
+        let View::ObjectInspector(addr) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        self.object_cache.remove(&key);
+        self.object_inflight = None;
+        self.object_displayed_key = None;
+        self.dyn_fields_cache.remove(&key);
+        self.dyn_fields_inflight = None;
+        self.dyn_fields_displayed_key = None;
     }
 
     fn move_account_selection(&mut self, delta: i32) {
@@ -1306,5 +1326,18 @@ mod tests {
         app.object_state = ObjectState::Loaded(ObjectData::empty());
         app.maybe_trigger_dyn_fields_fetch();
         assert!(matches!(app.dyn_fields_state, DynFieldsState::Loading));
+    }
+
+    #[test]
+    fn object_inspector_r_refreshes() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        let rpc_url = "https://testnet.example.com".to_string();
+        let obj_key = (addr, rpc_url.clone());
+        app.object_displayed_key = Some(obj_key.clone());
+        app.object_state = ObjectState::Loaded(ObjectData::empty());
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(app.object_displayed_key.is_none());
     }
 }
