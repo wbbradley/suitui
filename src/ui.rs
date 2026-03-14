@@ -43,14 +43,14 @@ fn border_style(focus: Focus, pane: Focus) -> Style {
 }
 
 fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
-    let env_label = app.pending_env.as_deref().unwrap_or("none");
+    let env_label = app.active_env.as_deref().unwrap_or("none");
     let title = format!("Accounts  [Env: {}]", env_label);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(border_style(app.focus, Focus::Accounts));
 
-    let items: Vec<ListItem> = app
+    let rows: Vec<Row> = app
         .accounts
         .iter()
         .map(|(addr, alias)| {
@@ -59,26 +59,30 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "  "
             };
-            let line = format!("  {}{}  {}", marker, alias, addr);
-            ListItem::new(line)
+            Row::new(vec![marker.to_string(), alias.clone(), addr.to_string()])
         })
         .collect();
 
-    let list = List::new(items)
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(12),
+        Constraint::Min(0),
+    ];
+    let table = Table::new(rows, widths)
         .block(block)
-        .highlight_style(
+        .row_highlight_style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
 
-    frame.render_stateful_widget(list, area, &mut app.account_list_state);
+    frame.render_stateful_widget(table, area, &mut app.account_list_state);
 }
 
 fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
     let addr_label = app
-        .selected_account_address()
+        .active_address
         .and_then(|a| {
             app.accounts
                 .iter()
@@ -154,105 +158,44 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus, Focus::NetworkInfo));
 
-    let has_pending = app.has_pending_changes();
-    let dim = Style::default().fg(Color::DarkGray);
-    let label_style = if has_pending {
-        dim
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let value_style = if has_pending { dim } else { Style::default() };
+    let label_style = Style::default().fg(Color::Gray);
 
     let mut lines = Vec::new();
-
-    // ── Active ──
-    let active_header_style = if has_pending {
-        dim
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    lines.push(Line::from(Span::styled(
-        "── Active ──",
-        active_header_style,
-    )));
 
     if let Some(env) = app.active_env_info() {
         lines.push(Line::from(vec![
             Span::styled("Env:     ", label_style),
-            Span::styled(env.alias.clone(), value_style),
+            Span::raw(env.alias.clone()),
         ]));
-        if !has_pending {
-            lines.push(Line::from(vec![
-                Span::styled("RPC:     ", label_style),
-                Span::styled(env.rpc.clone(), value_style),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Chain:   ", label_style),
-                Span::styled(
-                    env.chain_id.as_deref().unwrap_or("unknown").to_string(),
-                    value_style,
-                ),
-            ]));
-        }
+        lines.push(Line::from(vec![
+            Span::styled("RPC:     ", label_style),
+            Span::raw(env.rpc.clone()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Chain:   ", label_style),
+            Span::raw(env.chain_id.as_deref().unwrap_or("unknown").to_string()),
+        ]));
     } else {
-        lines.push(Line::from(Span::styled("No active environment", dim)));
+        lines.push(Line::from(Span::styled(
+            "No active environment",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     let active_alias = alias_for(app, app.active_address).unwrap_or("none");
     lines.push(Line::from(vec![
         Span::styled("Account: ", label_style),
-        Span::styled(active_alias, value_style),
+        Span::raw(active_alias),
     ]));
-
-    // ── Pending ──
-    if has_pending {
-        lines.push(Line::from(""));
-        let pending_header = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-        lines.push(Line::from(Span::styled(
-            "── Pending (F10 to apply) ──",
-            pending_header,
-        )));
-
-        let plabel = Style::default().fg(Color::Gray);
-        if let Some(env) = app.pending_env_info() {
-            lines.push(Line::from(vec![
-                Span::styled("Env:     ", plabel),
-                Span::raw(env.alias.clone()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("RPC:     ", plabel),
-                Span::raw(env.rpc.clone()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Chain:   ", plabel),
-                Span::raw(env.chain_id.as_deref().unwrap_or("unknown").to_string()),
-            ]));
-        }
-        let pending_alias = alias_for(app, app.selected_account_address()).unwrap_or("none");
-        lines.push(Line::from(vec![
-            Span::styled("Account: ", plabel),
-            Span::raw(pending_alias),
-        ]));
-    }
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-fn draw_help_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let (f10_key_style, f10_desc_style) = if app.has_pending_changes() {
-        (Style::default().fg(Color::Cyan), Style::default())
-    } else {
-        (
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::DarkGray),
-        )
-    };
+fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("F10", f10_key_style),
-        Span::styled(": Apply  ", f10_desc_style),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(": Select  "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
         Span::raw(": Quit  "),
         Span::styled("↑↓", Style::default().fg(Color::Cyan)),

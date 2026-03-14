@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::widgets::ListState;
+use ratatui::widgets::{ListState, TableState};
 use sui_types::base_types::SuiAddress;
 use tokio::sync::mpsc;
 
@@ -45,11 +45,8 @@ pub struct App {
     pub active_address: Option<SuiAddress>,
     pub active_env: Option<String>,
 
-    pub pending_address: Option<SuiAddress>,
-    pub pending_env: Option<String>,
-
     pub focus: Focus,
-    pub account_list_state: ListState,
+    pub account_list_state: TableState,
     pub env_dropdown_open: bool,
     pub env_list_state: ListState,
 
@@ -80,7 +77,7 @@ impl App {
             .and_then(|env| data.envs.iter().position(|e| e.alias == *env))
             .unwrap_or(0);
 
-        let mut account_list_state = ListState::default();
+        let mut account_list_state = TableState::default();
         account_list_state.select(Some(active_idx));
 
         let mut env_list_state = ListState::default();
@@ -89,8 +86,6 @@ impl App {
         let (coin_tx, coin_rx) = mpsc::unbounded_channel();
 
         App {
-            pending_address: data.active_address,
-            pending_env: data.active_env.clone(),
             active_address: data.active_address,
             active_env: data.active_env,
             accounts,
@@ -107,10 +102,6 @@ impl App {
         }
     }
 
-    pub fn has_pending_changes(&self) -> bool {
-        self.pending_address != self.active_address || self.pending_env != self.active_env
-    }
-
     pub fn selected_account_address(&self) -> Option<SuiAddress> {
         self.account_list_state
             .selected()
@@ -120,11 +111,6 @@ impl App {
 
     pub fn active_env_info(&self) -> Option<&Env> {
         let env_name = self.active_env.as_ref()?;
-        self.envs.iter().find(|e| e.alias == *env_name)
-    }
-
-    pub fn pending_env_info(&self) -> Option<&Env> {
-        let env_name = self.pending_env.as_ref()?;
         self.envs.iter().find(|e| e.alias == *env_name)
     }
 
@@ -163,8 +149,11 @@ impl App {
                 }
                 AppAction::Redraw
             }
-            KeyCode::F(10) => {
-                self.apply_pending();
+            KeyCode::Enter => {
+                if self.focus == Focus::Accounts {
+                    self.active_address = self.selected_account_address();
+                    self.coin_fetch_key = None;
+                }
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -189,7 +178,7 @@ impl App {
                 if let Some(idx) = self.env_list_state.selected()
                     && let Some(env) = self.envs.get(idx)
                 {
-                    self.pending_env = Some(env.alias.clone());
+                    self.active_env = Some(env.alias.clone());
                 }
                 self.env_dropdown_open = false;
                 self.coin_fetch_key = None;
@@ -206,7 +195,6 @@ impl App {
         let current = self.account_list_state.selected().unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(self.accounts.len() as i32) as usize;
         self.account_list_state.select(Some(next));
-        self.pending_address = Some(self.accounts[next].0);
     }
 
     fn move_env_selection(&mut self, delta: i32) {
@@ -218,18 +206,12 @@ impl App {
         self.env_list_state.select(Some(next));
     }
 
-    fn apply_pending(&mut self) {
-        self.active_address = self.pending_address;
-        self.active_env = self.pending_env.clone();
-        self.coin_fetch_key = None;
-    }
-
     pub fn maybe_trigger_coin_fetch(&mut self) {
-        let Some(addr) = self.selected_account_address() else {
+        let Some(addr) = self.active_address else {
             self.coin_state = CoinState::Idle;
             return;
         };
-        let Some(env) = self.pending_env_info() else {
+        let Some(env) = self.active_env_info() else {
             self.coin_state = CoinState::Idle;
             return;
         };
@@ -328,7 +310,6 @@ mod tests {
         let (app, addrs) = test_app();
         assert_eq!(app.account_list_state.selected(), Some(1));
         assert_eq!(app.active_address, Some(addrs[1]));
-        assert_eq!(app.pending_address, Some(addrs[1]));
     }
 
     #[test]
@@ -336,7 +317,6 @@ mod tests {
         let (app, _) = test_app();
         assert_eq!(app.env_list_state.selected(), Some(1));
         assert_eq!(app.active_env.as_deref(), Some("testnet"));
-        assert_eq!(app.pending_env.as_deref(), Some("testnet"));
     }
 
     #[test]
@@ -350,28 +330,21 @@ mod tests {
     }
 
     #[test]
-    fn no_pending_changes_initially() {
-        let (app, _) = test_app();
-        assert!(!app.has_pending_changes());
-    }
-
-    #[test]
-    fn navigate_down_sets_pending_address() {
+    fn navigate_down_moves_cursor() {
         let (mut app, addrs) = test_app();
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.account_list_state.selected(), Some(2));
-        assert_eq!(app.pending_address, Some(addrs[2]));
-        assert!(app.has_pending_changes());
+        // active_address unchanged until Enter
+        assert_eq!(app.active_address, Some(addrs[1]));
     }
 
     #[test]
     fn navigate_wraps_around() {
-        let (mut app, addrs) = test_app();
+        let (mut app, _) = test_app();
         // Start at index 1 (bob), go down twice to wrap: 1->2->0
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.account_list_state.selected(), Some(0));
-        assert_eq!(app.pending_address, Some(addrs[0]));
     }
 
     #[test]
@@ -398,7 +371,6 @@ mod tests {
         app.focus = Focus::Coins;
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.account_list_state.selected(), Some(1));
-        assert!(!app.has_pending_changes());
     }
 
     #[test]
@@ -471,27 +443,8 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter));
         assert!(!app.env_dropdown_open);
-        assert_eq!(app.pending_env.as_deref(), Some("devnet"));
-        assert!(app.has_pending_changes());
-        assert_eq!(app.active_env.as_deref(), Some("testnet"));
-        assert_eq!(app.pending_env_info().unwrap().alias, "devnet");
+        assert_eq!(app.active_env.as_deref(), Some("devnet"));
         assert!(app.coin_fetch_key.is_none());
-    }
-
-    #[test]
-    fn f10_applies_pending() {
-        let (mut app, addrs) = test_app();
-        app.handle_key(key(KeyCode::Down)); // select carol
-        app.handle_key(key(KeyCode::Char('e')));
-        app.handle_key(key(KeyCode::Down)); // mainnet
-        app.handle_key(key(KeyCode::Enter));
-
-        assert!(app.has_pending_changes());
-
-        app.handle_key(key(KeyCode::F(10)));
-        assert!(!app.has_pending_changes());
-        assert_eq!(app.active_address, Some(addrs[2]));
-        assert_eq!(app.active_env.as_deref(), Some("mainnet"));
     }
 
     #[test]
@@ -535,16 +488,14 @@ mod tests {
         let (mut data, _) = test_wallet_data();
         data.active_env = None;
         let mut app = App::new(data);
-        app.pending_env = None;
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Idle));
     }
 
     #[tokio::test]
-    async fn coin_fetch_uses_pending_env() {
+    async fn coin_fetch_uses_active_env() {
         let (mut app, _) = test_app();
-        // Switch pending env to devnet (active is still testnet)
-        app.pending_env = Some("devnet".into());
+        app.active_env = Some("devnet".into());
         app.maybe_trigger_coin_fetch();
         assert!(matches!(app.coin_state, CoinState::Loading));
         let (_, rpc_url) = app.coin_fetch_key.as_ref().unwrap();
@@ -568,13 +519,25 @@ mod tests {
         assert_eq!(app.coin_fetch_key, key1);
     }
 
-    #[tokio::test]
-    async fn apply_pending_clears_coin_fetch_key() {
-        let (mut app, _) = test_app();
-        app.maybe_trigger_coin_fetch();
-        assert!(app.coin_fetch_key.is_some());
-        app.handle_key(key(KeyCode::F(10)));
-        assert!(app.coin_fetch_key.is_none());
+    #[test]
+    fn enter_sets_active_address() {
+        let (mut app, addrs) = test_app();
+        // Navigate cursor to carol (index 2)
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.account_list_state.selected(), Some(2));
+        // active_address still bob
+        assert_eq!(app.active_address, Some(addrs[1]));
+        // Press Enter
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.active_address, Some(addrs[2]));
+    }
+
+    #[test]
+    fn enter_in_coins_focus_does_nothing() {
+        let (mut app, addrs) = test_app();
+        app.focus = Focus::Coins;
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.active_address, Some(addrs[1]));
     }
 
     #[test]
