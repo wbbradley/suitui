@@ -36,7 +36,6 @@ use crate::{
     object_fetcher::{
         self,
         DynFieldInfo,
-        DynFieldKind,
         DynFieldsFetchResult,
         ObjectData,
         ObjectFetchResult,
@@ -257,9 +256,10 @@ impl App {
         if let DynFieldsState::Loaded(fields) = &self.dyn_fields_state {
             for f in fields {
                 if let Some(id) = &f.child_id
-                    && let Ok(addr) = id.parse::<Address>() {
-                        links.push(addr);
-                    }
+                    && let Ok(addr) = id.parse::<Address>()
+                {
+                    links.push(addr);
+                }
             }
         }
         links
@@ -716,7 +716,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::{Account, Env, WalletData};
+    use crate::{
+        config::{Account, Env, WalletData},
+        object_fetcher::DynFieldKind,
+    };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

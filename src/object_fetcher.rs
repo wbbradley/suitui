@@ -18,7 +18,6 @@ use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct ObjectData {
-    pub object_id: String,
     pub version: u64,
     pub digest: String,
     pub owner: OwnerInfo,
@@ -32,7 +31,6 @@ pub struct ObjectData {
 impl ObjectData {
     pub fn empty() -> Self {
         ObjectData {
-            object_id: String::new(),
             version: 0,
             digest: String::new(),
             owner: OwnerInfo::Unknown,
@@ -148,7 +146,6 @@ async fn fetch_dyn_fields(parent_id: &Address, rpc_url: &str) -> Result<Vec<DynF
 
 fn convert_object(obj: &Object) -> ObjectData {
     ObjectData {
-        object_id: obj.object_id_opt().unwrap_or("").to_string(),
         version: obj.version_opt().unwrap_or(0),
         digest: obj.digest_opt().unwrap_or("").to_string(),
         owner: obj
