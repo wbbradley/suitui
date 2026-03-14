@@ -49,6 +49,7 @@ pub enum CoinState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Main,
+    ObjectInspector(Address),
 }
 
 pub enum AppAction {
@@ -59,6 +60,9 @@ pub enum AppAction {
 
 pub struct App {
     pub view_stack: Vec<View>,
+    pub address_input_open: bool,
+    pub address_input: String,
+    pub address_input_error: Option<String>,
     pub accounts: Vec<(Address, String)>,
     pub envs: Vec<Env>,
 
@@ -116,6 +120,9 @@ impl App {
 
         App {
             view_stack: vec![View::Main],
+            address_input_open: false,
+            address_input: String::new(),
+            address_input_error: None,
             active_address: data.active_address,
             active_env: data.active_env,
             config_path: data.config_path,
@@ -176,10 +183,14 @@ impl App {
         }
         match self.current_view() {
             View::Main => self.handle_main_key(key),
+            View::ObjectInspector(_) => self.handle_object_inspector_key(key),
         }
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.address_input_open {
+            return self.handle_address_input_key(key);
+        }
         if self.env_dropdown_open {
             return self.handle_env_dropdown_key(key);
         }
@@ -221,6 +232,12 @@ impl App {
                 }
                 AppAction::Redraw
             }
+            KeyCode::Char('i') => {
+                self.address_input_open = true;
+                self.address_input.clear();
+                self.address_input_error = None;
+                AppAction::Redraw
+            }
             KeyCode::Char('r') => {
                 if self.focus == Focus::Accounts || self.focus == Focus::Coins {
                     self.force_refresh_coins();
@@ -258,6 +275,51 @@ impl App {
                     self.active_address,
                     self.active_env.as_deref(),
                 );
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_address_input_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.address_input_open = false;
+                self.address_input.clear();
+                self.address_input_error = None;
+                AppAction::Redraw
+            }
+            KeyCode::Enter => match self.address_input.parse::<Address>() {
+                Ok(addr) => {
+                    self.address_input_open = false;
+                    self.address_input.clear();
+                    self.address_input_error = None;
+                    self.push_view(View::ObjectInspector(addr));
+                    AppAction::Redraw
+                }
+                Err(e) => {
+                    self.address_input_error = Some(e.to_string());
+                    AppAction::Redraw
+                }
+            },
+            KeyCode::Backspace => {
+                self.address_input.pop();
+                self.address_input_error = None;
+                AppAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                self.address_input.push(c);
+                self.address_input_error = None;
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_object_inspector_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pop_view();
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -898,5 +960,89 @@ mod tests {
         assert!(continuing);
         assert!(!app.should_quit);
         assert_eq!(app.view_stack.len(), 1);
+    }
+
+    #[test]
+    fn i_opens_address_input() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        assert!(app.address_input_open);
+        assert!(app.address_input.is_empty());
+    }
+
+    #[test]
+    fn address_input_esc_cancels() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('0')));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.address_input_open);
+        assert!(app.address_input.is_empty());
+    }
+
+    #[test]
+    fn address_input_typing_appends() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('0')));
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(app.address_input, "0x2");
+    }
+
+    #[test]
+    fn address_input_backspace_removes() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('b')));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.address_input, "a");
+    }
+
+    #[test]
+    fn address_input_valid_pushes_inspector() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.address_input_open);
+        assert_eq!(app.view_stack.len(), 2);
+        assert!(matches!(app.current_view(), View::ObjectInspector(_)));
+    }
+
+    #[test]
+    fn address_input_invalid_shows_error() {
+        let (mut app, _) = test_app();
+        app.handle_key(key(KeyCode::Char('i')));
+        for c in "not_hex".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.address_input_open);
+        assert!(app.address_input_error.is_some());
+        assert_eq!(app.view_stack.len(), 1);
+    }
+
+    #[test]
+    fn object_inspector_esc_pops_back() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        assert_eq!(app.view_stack.len(), 2);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view_stack.len(), 1);
+        assert_eq!(app.current_view(), View::Main);
+    }
+
+    #[test]
+    fn object_inspector_q_pops_back() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::ObjectInspector(addr));
+        app.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(app.current_view(), View::Main);
     }
 }

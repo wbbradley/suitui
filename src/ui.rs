@@ -15,6 +15,7 @@ use crate::{
 pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.current_view() {
         View::Main => draw_main(frame, app),
+        View::ObjectInspector(addr) => draw_object_inspector(frame, addr),
     }
 }
 
@@ -37,6 +38,9 @@ fn draw_main(frame: &mut Frame, app: &mut App) {
 
     if app.env_dropdown_open {
         draw_env_dropdown(frame, app, left_rows[0]);
+    }
+    if app.address_input_open {
+        draw_address_input(frame, app, frame.area());
     }
 }
 
@@ -236,6 +240,8 @@ fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
         Span::raw(": Switch pane  "),
         Span::styled("e", Style::default().fg(Color::Cyan)),
         Span::raw(": Env  "),
+        Span::styled("i", Style::default().fg(Color::Cyan)),
+        Span::raw(": Inspect  "),
         Span::styled("r", Style::default().fg(Color::Cyan)),
         Span::raw(": Refresh"),
     ]));
@@ -279,6 +285,59 @@ fn draw_env_dropdown(frame: &mut Frame, app: &mut App, anchor: Rect) {
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, dropdown_area, &mut app.env_list_state);
+}
+
+fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 6u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Inspect Object")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let input_line = format!("{}█", &app.address_input);
+    let input = Paragraph::new(input_line);
+    let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(input, input_area);
+
+    if let Some(err) = &app.address_input_error {
+        let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
+        let err_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        frame.render_widget(err_line, err_area);
+    }
+
+    let help =
+        Paragraph::new("Enter: Inspect  Esc: Cancel").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_object_inspector(frame: &mut Frame, addr: Address) {
+    let block = Block::default()
+        .title(format!("Object Inspector: {}", addr))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let help =
+        Paragraph::new("  Press Esc or q to go back\n\n  (Object fetching not yet implemented)")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(block);
+
+    frame.render_widget(help, frame.area());
 }
 
 #[cfg(test)]
