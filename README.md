@@ -8,7 +8,7 @@ balances — all from the command line.
 Requires a nightly Rust toolchain (edition 2024).
 
 ```sh
-cargo install --locked --git https://github.com/wbbradley/suitui.git
+cargo install suitui
 ```
 
 Or build from source:
