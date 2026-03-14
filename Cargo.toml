@@ -1,6 +1,6 @@
 [package]
 name = "suitui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A terminal UI for managing your Sui wallet"
 license = "MIT"
@@ -15,7 +15,7 @@ crossterm = "0.29.0"
 anyhow = "1.0.102"
 home = "0.5.12"
 tokio = { version = "1", features = ["full"] }
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", version = "0.2.2" }
+sui-rpc = { version = "0.2.2" }
 futures = "0.3.32"
 clap = { version = "4.6.0", features = ["derive"] }
 sui-sdk-types = { version = "0.2.2", features = ["serde", "hash", "rand"] }
