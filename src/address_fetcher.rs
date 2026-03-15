@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use futures::StreamExt;
 use prost_types::FieldMask;
 use sui_rpc::{
@@ -8,7 +10,7 @@ use sui_rpc::{
 use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
-use crate::coin_fetcher::CoinBalance;
+use crate::coin_fetcher::{CoinBalance, SUI_DECIMALS, fetch_coin_decimals};
 
 #[derive(Clone)]
 pub struct OwnedObjectSummary {
@@ -54,7 +56,7 @@ pub fn spawn_address_fetch(
 }
 
 async fn fetch_address_data(address: &Address, rpc_url: &str) -> Result<AddressData, String> {
-    let client = Client::new(rpc_url).map_err(|e| e.to_string())?;
+    let mut client = Client::new(rpc_url).map_err(|e| e.to_string())?;
 
     // Fetch balances
     let request = ListBalancesRequest::const_default()
@@ -63,16 +65,40 @@ async fn fetch_address_data(address: &Address, rpc_url: &str) -> Result<AddressD
     let stream = client.list_balances(request);
     futures::pin_mut!(stream);
 
-    let mut balances = Vec::new();
+    let mut raw_balances = Vec::new();
     while let Some(result) = stream.next().await {
         let bal = result.map_err(|e| e.to_string())?;
         let coin_type = bal.coin_type_opt().unwrap_or("unknown").to_string();
         let total_balance = bal.balance_opt().unwrap_or(0);
-        balances.push(CoinBalance {
-            coin_type,
-            total_balance,
-        });
+        raw_balances.push((coin_type, total_balance));
     }
+
+    let unique_types: Vec<String> = raw_balances
+        .iter()
+        .map(|(ct, _)| ct.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut decimals_map = HashMap::new();
+    for ct in &unique_types {
+        let d = fetch_coin_decimals(&mut client, ct).await;
+        decimals_map.insert(ct.clone(), d);
+    }
+
+    let mut balances: Vec<CoinBalance> = raw_balances
+        .into_iter()
+        .map(|(coin_type, total_balance)| {
+            let decimals = decimals_map
+                .get(&coin_type)
+                .copied()
+                .unwrap_or(SUI_DECIMALS);
+            CoinBalance {
+                coin_type,
+                total_balance,
+                decimals,
+            }
+        })
+        .collect();
     balances.sort_by(|a, b| {
         let a_is_sui = a.coin_type.ends_with("::SUI");
         let b_is_sui = b.coin_type.ends_with("::SUI");

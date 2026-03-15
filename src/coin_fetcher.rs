@@ -1,15 +1,20 @@
+use std::collections::HashMap;
+
 use futures::StreamExt;
 use sui_rpc::{
     Client,
-    proto::sui::rpc::v2::{GetServiceInfoRequest, ListBalancesRequest},
+    proto::sui::rpc::v2::{GetCoinInfoRequest, GetServiceInfoRequest, ListBalancesRequest},
 };
 use sui_sdk_types::Address;
 use tokio::sync::mpsc;
+
+pub const SUI_DECIMALS: u32 = 9;
 
 #[derive(Clone)]
 pub struct CoinBalance {
     pub coin_type: String,
     pub total_balance: u64,
+    pub decimals: u32,
 }
 
 pub struct CoinFetchResult {
@@ -75,6 +80,33 @@ pub fn short_coin_type(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
 }
 
+pub async fn fetch_coin_decimals(client: &mut Client, coin_type: &str) -> u32 {
+    let request = GetCoinInfoRequest::const_default().with_coin_type(coin_type);
+    match client.state_client().get_coin_info(request).await {
+        Ok(resp) => resp
+            .into_inner()
+            .metadata_opt()
+            .and_then(|m| m.decimals_opt())
+            .unwrap_or(SUI_DECIMALS),
+        Err(_) => SUI_DECIMALS,
+    }
+}
+
+pub fn format_signed_balance(amount_str: &str, decimals: u32) -> String {
+    let trimmed = amount_str.trim();
+    if trimmed.is_empty() {
+        return "0".into();
+    }
+    let (sign, abs_str) = match trimmed.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", trimmed),
+    };
+    match abs_str.parse::<u64>() {
+        Ok(val) => format!("{sign}{}", format_balance(val, decimals)),
+        Err(_) => amount_str.to_string(),
+    }
+}
+
 pub struct ChainIdResult {
     pub rpc_url: String,
     pub outcome: Result<String, String>,
@@ -113,7 +145,7 @@ pub fn spawn_fetch(address: Address, rpc_url: String, tx: mpsc::UnboundedSender<
 }
 
 async fn fetch_balances(address: &Address, rpc_url: &str) -> Result<Vec<CoinBalance>, String> {
-    let client = Client::new(rpc_url).map_err(|e| e.to_string())?;
+    let mut client = Client::new(rpc_url).map_err(|e| e.to_string())?;
     let request = ListBalancesRequest::const_default()
         .with_owner(address.to_string())
         .with_page_size(1000);
@@ -121,16 +153,40 @@ async fn fetch_balances(address: &Address, rpc_url: &str) -> Result<Vec<CoinBala
     let stream = client.list_balances(request);
     futures::pin_mut!(stream);
 
-    let mut balances = Vec::new();
+    let mut raw_balances = Vec::new();
     while let Some(result) = stream.next().await {
         let bal = result.map_err(|e| e.to_string())?;
         let coin_type = bal.coin_type_opt().unwrap_or("unknown").to_string();
         let total_balance = bal.balance_opt().unwrap_or(0);
-        balances.push(CoinBalance {
-            coin_type,
-            total_balance,
-        });
+        raw_balances.push((coin_type, total_balance));
     }
+
+    let unique_types: Vec<String> = raw_balances
+        .iter()
+        .map(|(ct, _)| ct.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut decimals_map = HashMap::new();
+    for ct in &unique_types {
+        let d = fetch_coin_decimals(&mut client, ct).await;
+        decimals_map.insert(ct.clone(), d);
+    }
+
+    let mut balances: Vec<CoinBalance> = raw_balances
+        .into_iter()
+        .map(|(coin_type, total_balance)| {
+            let decimals = decimals_map
+                .get(&coin_type)
+                .copied()
+                .unwrap_or(SUI_DECIMALS);
+            CoinBalance {
+                coin_type,
+                total_balance,
+                decimals,
+            }
+        })
+        .collect();
 
     // Sort: SUI first, then alphabetical
     balances.sort_by(|a, b| {
@@ -229,5 +285,37 @@ mod tests {
     fn parse_amount_round_trip() {
         let raw = parse_amount("1.5", 9).unwrap();
         assert_eq!(format_balance(raw, 9), "1.5");
+    }
+
+    #[test]
+    fn format_signed_balance_negative() {
+        assert_eq!(format_signed_balance("-1000000000", 9), "-1");
+    }
+
+    #[test]
+    fn format_signed_balance_positive_fractional() {
+        assert_eq!(format_signed_balance("1500000000", 9), "1.5");
+    }
+
+    #[test]
+    fn format_signed_balance_usdc_negative() {
+        assert_eq!(format_signed_balance("-1000000", 6), "-1");
+    }
+
+    #[test]
+    fn format_signed_balance_zero() {
+        assert_eq!(format_signed_balance("0", 9), "0");
+    }
+
+    #[test]
+    fn format_signed_balance_empty() {
+        assert_eq!(format_signed_balance("", 9), "0");
+    }
+
+    #[test]
+    fn parse_amount_6_decimals_round_trip() {
+        let raw = parse_amount("1.5", 6).unwrap();
+        assert_eq!(raw, 1_500_000);
+        assert_eq!(format_balance(raw, 6), "1.5");
     }
 }

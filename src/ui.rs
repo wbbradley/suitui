@@ -21,7 +21,7 @@ use crate::{
         TxHistoryState,
         View,
     },
-    coin_fetcher::{format_balance, short_coin_type},
+    coin_fetcher::{SUI_DECIMALS, format_balance, format_signed_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
     transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
     transfer_executor::TransferResult,
@@ -176,7 +176,7 @@ fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
                     .map(|b| {
                         Row::new(vec![
                             short_coin_type(&b.coin_type).to_string(),
-                            format_balance(b.total_balance, 9),
+                            format_balance(b.total_balance, b.decimals),
                         ])
                     })
                     .collect();
@@ -424,7 +424,7 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
             let label = format!(
                 "{} — {}",
                 short_coin_type(&b.coin_type),
-                format_balance(b.total_balance, 9)
+                format_balance(b.total_balance, b.decimals)
             );
             ListItem::new(label)
         })
@@ -522,7 +522,7 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|b| {
             (
                 short_coin_type(&b.coin_type).to_string(),
-                format_balance(b.total_balance, 9),
+                format_balance(b.total_balance, b.decimals),
             )
         })
         .unwrap_or(("?".into(), "?".into()));
@@ -576,6 +576,11 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     let label_style = Style::default().fg(Color::Gray);
 
     let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+    let selected_decimals = state
+        .balances
+        .get(selected_idx)
+        .map(|b| b.decimals)
+        .unwrap_or(SUI_DECIMALS);
     let coin_label = state
         .balances
         .get(selected_idx)
@@ -584,7 +589,7 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     let recipient = state.recipient.map(|a| a.to_string()).unwrap_or("?".into());
     let amount = state
         .amount_raw
-        .map(|r| format_balance(r, 9))
+        .map(|r| format_balance(r, selected_decimals))
         .unwrap_or("?".into());
 
     let lines = vec![
@@ -1041,7 +1046,7 @@ fn append_address_balances_lines<'a>(lines: &mut Vec<Line<'a>>, data: &AddressDa
                     short_coin_type(&b.coin_type).to_string(),
                     Style::default().fg(Color::Yellow),
                 ),
-                Span::raw(format!("  {}", format_balance(b.total_balance, 9))),
+                Span::raw(format!("  {}", format_balance(b.total_balance, b.decimals))),
             ]));
         }
     }
@@ -1154,7 +1159,7 @@ fn draw_tx_table(
                 .map(|g| {
                     let total = g.computation_cost.saturating_add(g.storage_cost);
                     let net = total.saturating_sub(g.storage_rebate);
-                    format_balance(net, 9)
+                    format_balance(net, SUI_DECIMALS)
                 })
                 .unwrap_or_else(|| "?".into());
             let changes = format_balance_changes(&tx.balance_changes);
@@ -1215,7 +1220,8 @@ fn format_balance_changes(changes: &[TxBalanceChange]) -> String {
         .take(3)
         .map(|bc| {
             let coin = short_coin_type(&bc.coin_type);
-            format!("{} {coin}", bc.amount)
+            let amount = format_signed_balance(&bc.amount, bc.decimals);
+            format!("{amount} {coin}")
         })
         .collect();
     let mut s = parts.join(", ");

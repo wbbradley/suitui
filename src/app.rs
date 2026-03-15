@@ -1109,9 +1109,14 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(state) = &mut self.transfer_state {
-                    match coin_fetcher::parse_amount(&state.amount_input, 9) {
+                    let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+                    let decimals = state
+                        .balances
+                        .get(selected_idx)
+                        .map(|b| b.decimals)
+                        .unwrap_or(9);
+                    match coin_fetcher::parse_amount(&state.amount_input, decimals) {
                         Ok(raw) => {
-                            let selected_idx = state.coin_list_state.selected().unwrap_or(0);
                             let available = state
                                 .balances
                                 .get(selected_idx)
@@ -1681,6 +1686,7 @@ mod tests {
             outcome: Ok(vec![CoinBalance {
                 coin_type: "0x2::sui::SUI".into(),
                 total_balance: 1_000_000_000,
+                decimals: 9,
             }]),
         });
         assert!(matches!(app.coin_state, CoinState::Loaded(ref b) if b.len() == 1));
@@ -1759,6 +1765,7 @@ mod tests {
                 balances: vec![CoinBalance {
                     coin_type: "0x2::sui::SUI".into(),
                     total_balance: 42,
+                    decimals: 9,
                 }],
                 error: None,
                 fetched_at: Instant::now(),
@@ -2209,10 +2216,12 @@ mod tests {
             CoinBalance {
                 coin_type: "0x2::sui::SUI".into(),
                 total_balance: 5_000_000_000,
+                decimals: 9,
             },
             CoinBalance {
                 coin_type: "0xabc::mod::USDC".into(),
                 total_balance: 100_000_000,
+                decimals: 6,
             },
         ]);
         (app, addrs)
@@ -2246,6 +2255,7 @@ mod tests {
         app.coin_state = CoinState::Loaded(vec![CoinBalance {
             coin_type: "0x2::sui::SUI".into(),
             total_balance: 1_000_000_000,
+            decimals: 9,
         }]);
         // keystore is empty by default
         app.handle_key(key(KeyCode::Char('s')));
@@ -2609,6 +2619,7 @@ mod tests {
         app.coin_state = CoinState::Loaded(vec![CoinBalance {
             coin_type: "0x2::sui::SUI".into(),
             total_balance: 1_000_000_000,
+            decimals: 9,
         }]);
         // Move cursor to carol (index 2)
         app.handle_key(key(KeyCode::Down));

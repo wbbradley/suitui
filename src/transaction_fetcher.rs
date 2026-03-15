@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use prost_types::FieldMask;
@@ -15,6 +15,8 @@ use sui_rpc::{
 use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
+use crate::coin_fetcher::fetch_coin_decimals;
+
 #[derive(Clone)]
 pub struct GasCostSummary {
     pub computation_cost: u64,
@@ -26,6 +28,7 @@ pub struct GasCostSummary {
 pub struct TxBalanceChange {
     pub coin_type: String,
     pub amount: String,
+    pub decimals: u32,
 }
 
 #[derive(Clone)]
@@ -117,6 +120,24 @@ async fn fetch_tx_history(
         ts_b.cmp(&ts_a)
     });
 
+    // Enrich balance changes with coin decimals
+    let unique_coin_types: HashSet<String> = summaries
+        .iter()
+        .flat_map(|s| s.balance_changes.iter().map(|bc| bc.coin_type.clone()))
+        .collect();
+    let mut decimals_map = HashMap::new();
+    for ct in &unique_coin_types {
+        let d = fetch_coin_decimals(&mut client, ct).await;
+        decimals_map.insert(ct.clone(), d);
+    }
+    for summary in &mut summaries {
+        for bc in &mut summary.balance_changes {
+            if let Some(&d) = decimals_map.get(&bc.coin_type) {
+                bc.decimals = d;
+            }
+        }
+    }
+
     Ok(summaries)
 }
 
@@ -140,6 +161,7 @@ fn convert_transaction(tx: &ExecutedTransaction) -> TransactionSummary {
             .map(|bc| TxBalanceChange {
                 coin_type: bc.coin_type_opt().unwrap_or("").to_string(),
                 amount: bc.amount_opt().unwrap_or("").to_string(),
+                decimals: 0,
             })
             .collect(),
     }
