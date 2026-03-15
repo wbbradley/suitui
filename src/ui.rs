@@ -24,7 +24,12 @@ use crate::{
     },
     coin_fetcher::{SUI_DECIMALS, format_balance, format_signed_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
-    transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
+    transaction_fetcher::{
+        self,
+        TransactionDetail,
+        TransactionSummary,
+        TxBalanceChange,
+    },
     transfer_executor::TransferResult,
 };
 
@@ -36,25 +41,318 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_address_inspector(frame, app, addr);
         }
         View::Inspector(InspectTarget::Transaction(ref digest)) => {
-            draw_tx_inspector_placeholder(frame, app, digest.clone());
+            draw_transaction_inspector(frame, app, digest.clone());
         }
         View::TransactionHistory(addr) => draw_transaction_history(frame, app, addr),
     }
 }
 
-fn draw_tx_inspector_placeholder(frame: &mut Frame, app: &App, digest: String) {
+fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+    let content_area = outer[0];
+    let help_area = outer[1];
+
+    let short_digest = if digest.len() > 16 {
+        format!("{}..{}", &digest[..8], &digest[digest.len() - 6..])
+    } else {
+        digest.clone()
+    };
     let block = Block::default()
-        .title(format!("Transaction: {digest}"))
+        .title(format!("Transaction: {short_digest}"))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    let msg = match &app.tx_detail_state {
-        TxDetailState::Loaded(_) => "Loaded (rendering coming soon)".to_string(),
-        TxDetailState::Loading => "Loading transaction...".to_string(),
-        TxDetailState::Error(e) => format!("Error: {e}"),
-        TxDetailState::Idle => "Waiting...".to_string(),
+
+    match &app.tx_detail_state {
+        TxDetailState::Idle | TxDetailState::Loading => {
+            let msg = if matches!(app.tx_detail_state, TxDetailState::Loading) {
+                "Loading transaction..."
+            } else {
+                "Waiting..."
+            };
+            let p = Paragraph::new(format!("  {msg}"))
+                .style(Style::default().fg(Color::Yellow))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        TxDetailState::Error(msg) => {
+            let p = Paragraph::new(format!("  Error: {msg}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        TxDetailState::Loaded(detail) => {
+            let selected = app.inspector_sel;
+            let mut link_idx = 0usize;
+            let mut lines = Vec::new();
+            append_tx_summary_lines(&mut lines, detail, selected, &mut link_idx);
+            append_tx_gas_lines(&mut lines, detail);
+            append_tx_balance_changes_lines(&mut lines, detail);
+            append_tx_changed_objects_lines(&mut lines, detail, selected, &mut link_idx);
+            append_tx_events_lines(&mut lines, detail, selected, &mut link_idx);
+
+            let p = Paragraph::new(lines).block(block);
+            frame.render_widget(p, content_area);
+        }
+    }
+
+    draw_inspector_help_bar(frame, help_area);
+}
+
+fn append_tx_summary_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    detail: &TransactionDetail,
+    selected: usize,
+    link_idx: &mut usize,
+) {
+    let label = Style::default().fg(Color::Gray);
+
+    lines.push(Line::from(vec![
+        Span::styled("  Digest:     ", label),
+        Span::raw(detail.digest.clone()),
+    ]));
+
+    let ts_str = detail
+        .timestamp
+        .as_ref()
+        .map(transaction_fetcher::format_timestamp)
+        .unwrap_or_else(|| "\u{2014}".into());
+    lines.push(Line::from(vec![
+        Span::styled("  Timestamp:  ", label),
+        Span::raw(ts_str),
+    ]));
+
+    let cp_str = detail
+        .checkpoint
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "\u{2014}".into());
+    lines.push(Line::from(vec![
+        Span::styled("  Checkpoint: ", label),
+        Span::raw(cp_str),
+    ]));
+
+    // Sender is a navigable link (Address)
+    let sender_linkable = detail.sender.parse::<Address>().is_ok();
+    if sender_linkable {
+        let is_selected = *link_idx == selected;
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}Sender:     "), label),
+            Span::styled(detail.sender.clone(), value_style),
+        ]));
+        *link_idx += 1;
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Sender:     ", label),
+            Span::raw(detail.sender.clone()),
+        ]));
+    }
+
+    let status_str = match detail.success {
+        Some(true) => "OK",
+        Some(false) => "FAIL",
+        None => "?",
     };
-    let paragraph = Paragraph::new(msg).block(block);
-    frame.render_widget(paragraph, frame.area());
+    let status_style = match detail.success {
+        Some(true) => Style::default().fg(Color::Green),
+        Some(false) => Style::default().fg(Color::Red),
+        None => Style::default().fg(Color::Yellow),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Status:     ", label),
+        Span::styled(status_str, status_style),
+    ]));
+}
+
+fn append_tx_gas_lines<'a>(lines: &mut Vec<Line<'a>>, detail: &TransactionDetail) {
+    let Some(gas) = &detail.gas_used else {
+        return;
+    };
+    let label = Style::default().fg(Color::Gray);
+    let net = (gas.computation_cost + gas.storage_cost) as i64 - gas.storage_rebate as i64;
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  \u{2500}\u{2500} Gas \u{2500}\u{2500}",
+        Style::default().fg(Color::Cyan),
+    ));
+    lines.push(Line::from(vec![
+        Span::styled("  Computation: ", label),
+        Span::raw(format_balance(gas.computation_cost, SUI_DECIMALS)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Storage:     ", label),
+        Span::raw(format_balance(gas.storage_cost, SUI_DECIMALS)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Rebate:      ", label),
+        Span::raw(format!(
+            "-{}",
+            format_balance(gas.storage_rebate, SUI_DECIMALS)
+        )),
+    ]));
+    let net_str = if net < 0 {
+        format!("-{}", format_balance((-net) as u64, SUI_DECIMALS))
+    } else {
+        format_balance(net as u64, SUI_DECIMALS)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Net:         ", label),
+        Span::styled(net_str, Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+}
+
+fn append_tx_balance_changes_lines<'a>(lines: &mut Vec<Line<'a>>, detail: &TransactionDetail) {
+    if detail.balance_changes.is_empty() {
+        return;
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  \u{2500}\u{2500} Balance Changes ({}) \u{2500}\u{2500}",
+            detail.balance_changes.len()
+        ),
+        Style::default().fg(Color::Cyan),
+    ));
+    for bc in &detail.balance_changes {
+        let coin = short_coin_type(&bc.coin_type);
+        let amount = format_signed_balance(&bc.amount, bc.decimals);
+        let amount_style = if bc.amount.starts_with('-') {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(coin.to_string(), Style::default().fg(Color::Yellow)),
+            Span::raw("  "),
+            Span::styled(amount, amount_style),
+        ]));
+    }
+}
+
+fn append_tx_changed_objects_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    detail: &TransactionDetail,
+    selected: usize,
+    link_idx: &mut usize,
+) {
+    if detail.changed_objects.is_empty() {
+        return;
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  \u{2500}\u{2500} Changed Objects ({}) \u{2500}\u{2500}",
+            detail.changed_objects.len()
+        ),
+        Style::default().fg(Color::Cyan),
+    ));
+    for obj in &detail.changed_objects {
+        let is_linkable = obj.object_id.parse::<Address>().is_ok();
+        if is_linkable {
+            let is_selected = *link_idx == selected;
+            let prefix = if is_selected { "> " } else { "  " };
+            let id_style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let short_type = short_coin_type(&obj.object_type);
+            lines.push(Line::from(vec![
+                Span::raw(prefix.to_string()),
+                Span::styled(obj.object_id.clone(), id_style),
+                Span::raw(format!("  {} ({})", short_type, obj.id_operation)),
+            ]));
+            *link_idx += 1;
+        } else {
+            let short_type = short_coin_type(&obj.object_type);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(obj.object_id.clone()),
+                Span::raw(format!("  {} ({})", short_type, obj.id_operation)),
+            ]));
+        }
+    }
+}
+
+fn append_tx_events_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    detail: &TransactionDetail,
+    selected: usize,
+    link_idx: &mut usize,
+) {
+    if detail.events.is_empty() {
+        return;
+    }
+
+    // Collect changed object IDs for dedup (matching tx_inspector_links logic)
+    let changed_ids: Vec<&str> = detail
+        .changed_objects
+        .iter()
+        .map(|o| o.object_id.as_str())
+        .collect();
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  \u{2500}\u{2500} Events ({}) \u{2500}\u{2500}",
+            detail.events.len()
+        ),
+        Style::default().fg(Color::Cyan),
+    ));
+    for (i, evt) in detail.events.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::raw(""));
+        }
+
+        // Package ID is a navigable link if parseable and NOT already in changed_objects
+        let pkg_is_link = evt.package_id.parse::<Address>().is_ok()
+            && !changed_ids.contains(&evt.package_id.as_str());
+        if pkg_is_link {
+            let is_selected = *link_idx == selected;
+            let prefix = if is_selected { "> " } else { "  " };
+            let id_style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            lines.push(Line::from(vec![
+                Span::raw(prefix.to_string()),
+                Span::styled(evt.package_id.clone(), id_style),
+                Span::raw(format!("::{}", evt.module)),
+            ]));
+            *link_idx += 1;
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{}::{}", evt.package_id, evt.module),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(evt.event_type.clone(), Style::default().fg(Color::Yellow)),
+        ]));
+        if let Some(json) = &evt.json {
+            render_json_lines(lines, json, 6);
+        }
+    }
 }
 
 fn draw_main(frame: &mut Frame, app: &mut App) {
