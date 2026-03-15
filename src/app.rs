@@ -65,6 +65,7 @@ pub enum TransferStep {
 
 pub struct TransferState {
     pub step: TransferStep,
+    pub sender: Address,
     pub balances: Vec<CoinBalance>,
     pub coin_list_state: ListState,
     pub recipient_input: String,
@@ -422,7 +423,7 @@ impl App {
                 AppAction::Redraw
             }
             KeyCode::Char('t') => {
-                if let Some(addr) = self.active_address {
+                if let Some(addr) = self.selected_account_address() {
                     self.tx_history_table_state.select(Some(0));
                     self.push_view(View::TransactionHistory(addr));
                 }
@@ -812,7 +813,9 @@ impl App {
     }
 
     fn open_transfer(&mut self) -> Result<(), &'static str> {
-        let addr = self.active_address.ok_or("no active address")?;
+        let addr = self
+            .selected_account_address()
+            .ok_or("no selected address")?;
         self.key_for_address(&addr)
             .ok_or("no signing key for this address")?;
         let balances = match &self.coin_state {
@@ -823,6 +826,7 @@ impl App {
         coin_list_state.select(Some(0));
         self.transfer_state = Some(TransferState {
             step: TransferStep::SelectCoin,
+            sender: addr,
             balances,
             coin_list_state,
             recipient_input: String::new(),
@@ -1012,8 +1016,9 @@ impl App {
     }
 
     fn begin_transfer_execution(&mut self) {
-        let Some(addr) = self.active_address else {
-            return;
+        let addr = match &self.transfer_state {
+            Some(state) => state.sender,
+            None => return,
         };
         let Some(key_entry) = self.keystore.iter().find(|k| k.address == addr) else {
             return;
@@ -2212,9 +2217,10 @@ mod tests {
 
     #[test]
     fn transfer_complete_enter_closes() {
-        let (mut app, _) = app_with_coins_and_key();
+        let (mut app, addrs) = app_with_coins_and_key();
         app.transfer_state = Some(TransferState {
             step: TransferStep::Complete,
+            sender: addrs[1],
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2233,9 +2239,10 @@ mod tests {
 
     #[test]
     fn transfer_complete_esc_closes() {
-        let (mut app, _) = app_with_coins_and_key();
+        let (mut app, addrs) = app_with_coins_and_key();
         app.transfer_state = Some(TransferState {
             step: TransferStep::Complete,
+            sender: addrs[1],
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2252,9 +2259,10 @@ mod tests {
 
     #[test]
     fn handle_transfer_exec_result_success() {
-        let (mut app, _) = app_with_coins_and_key();
+        let (mut app, addrs) = app_with_coins_and_key();
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
+            sender: addrs[1],
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2279,9 +2287,10 @@ mod tests {
 
     #[test]
     fn handle_transfer_exec_result_error() {
-        let (mut app, _) = app_with_coins_and_key();
+        let (mut app, addrs) = app_with_coins_and_key();
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
+            sender: addrs[1],
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2307,6 +2316,7 @@ mod tests {
         app.coin_displayed_key = Some((addrs[1], rpc_url));
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
+            sender: addrs[1],
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2341,5 +2351,38 @@ mod tests {
         assert_eq!(state.step, TransferStep::EnterRecipient);
         assert_eq!(state.recipient_input, "0x2");
         assert_eq!(state.amount_input, "1");
+    }
+
+    #[test]
+    fn t_uses_selected_address() {
+        let (mut app, addrs) = test_app();
+        // Cursor starts at addrs[1] (bob). Move to carol (index 2).
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_account_address(), Some(addrs[2]));
+        // active_address is still bob
+        assert_eq!(app.active_address, Some(addrs[1]));
+        // Press 't' — should open tx history for carol, not bob
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.current_view(), View::TransactionHistory(addrs[2]));
+    }
+
+    #[test]
+    fn s_uses_selected_address() {
+        let (mut app, addrs) = test_app();
+        // Give carol (addrs[2]) a key and coins
+        app.keystore = vec![KeyEntry::test_entry(addrs[2])];
+        app.coin_state = CoinState::Loaded(vec![CoinBalance {
+            coin_type: "0x2::sui::SUI".into(),
+            total_balance: 1_000_000_000,
+        }]);
+        // Move cursor to carol (index 2)
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_account_address(), Some(addrs[2]));
+        // active_address is still bob
+        assert_eq!(app.active_address, Some(addrs[1]));
+        // Press 's' — should capture carol as sender
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_some());
+        assert_eq!(app.transfer_state.as_ref().unwrap().sender, addrs[2]);
     }
 }
