@@ -414,7 +414,10 @@ fn append_tx_events_lines<'a>(
 
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(evt.event_type.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                shorten_package_ids(&evt.event_type),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
         if let Some(json) = &evt.json {
             render_json_lines(lines, json, 6);
@@ -1220,7 +1223,7 @@ fn append_metadata_lines<'a>(
 
     lines.push(Line::from(vec![
         Span::styled("  Type:     ", label),
-        Span::raw(data.object_type.clone()),
+        Span::raw(shorten_package_ids(&data.object_type)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Version:  ", label),
@@ -1405,7 +1408,11 @@ fn append_dyn_fields_lines<'a>(
                         lines.push(Line::from(vec![
                             Span::raw(prefix.to_string()),
                             Span::styled(kind_str, Style::default().fg(Color::Yellow)),
-                            Span::raw(format!("  {}  {}  ", f.field_id, f.value_type)),
+                            Span::raw(format!(
+                                "  {}  {}  ",
+                                f.field_id,
+                                shorten_package_ids(&f.value_type)
+                            )),
                             Span::styled(child, child_style),
                         ]));
                         *link_idx += 1;
@@ -1414,13 +1421,49 @@ fn append_dyn_fields_lines<'a>(
                         lines.push(Line::from(vec![
                             Span::styled("  ", Style::default()),
                             Span::styled(kind_str, Style::default().fg(Color::Yellow)),
-                            Span::raw(format!("  {}  {}  {}", f.field_id, f.value_type, child)),
+                            Span::raw(format!(
+                                "  {}  {}  {}",
+                                f.field_id,
+                                shorten_package_ids(&f.value_type),
+                                child
+                            )),
                         ]));
                     }
                 }
             }
         }
     }
+}
+
+/// Shorten 0x-prefixed 64-hex-char package IDs to minimal form when value <= 0xffff.
+/// E.g. "0x0000000000000000000000000000000000000000000000000000000000000002" → "0x2"
+fn shorten_package_ids(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 66 <= bytes.len()
+            && bytes[i] == b'0'
+            && bytes[i + 1] == b'x'
+            && bytes[i + 2..i + 66].iter().all(|b| b.is_ascii_hexdigit())
+        {
+            let hex_str = &s[i + 2..i + 66];
+            // Check if first 60 hex chars are all zeros (value fits in 16 bits)
+            if hex_str[..60].bytes().all(|b| b == b'0') {
+                let tail = hex_str[60..].trim_start_matches('0');
+                let short = if tail.is_empty() { "0" } else { tail };
+                result.push_str("0x");
+                result.push_str(short);
+            } else {
+                result.push_str(&s[i..i + 66]);
+            }
+            i += 66;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
 }
 
 fn compute_scroll(selected_line: Option<u16>, visible_height: u16) -> u16 {
@@ -1768,5 +1811,42 @@ mod tests {
     fn compute_scroll_selected_at_threshold() {
         assert_eq!(compute_scroll(Some(10), 30), 0);
         assert_eq!(compute_scroll(Some(11), 30), 1);
+    }
+
+    #[test]
+    fn shorten_package_ids_basic() {
+        assert_eq!(
+            shorten_package_ids(
+                "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin"
+            ),
+            "0x2::coin::Coin"
+        );
+    }
+
+    #[test]
+    fn shorten_package_ids_generic() {
+        let input = "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI>";
+        assert_eq!(shorten_package_ids(input), "0x2::coin::Coin<0x2::sui::SUI>");
+    }
+
+    #[test]
+    fn shorten_package_ids_large_address_unchanged() {
+        let input = "0x00000000000000000000000000000000000000000000000000000000000abcde::mod::Type";
+        assert_eq!(shorten_package_ids(input), input);
+    }
+
+    #[test]
+    fn shorten_package_ids_zero() {
+        assert_eq!(
+            shorten_package_ids(
+                "0x0000000000000000000000000000000000000000000000000000000000000000::mod::T"
+            ),
+            "0x0::mod::T"
+        );
+    }
+
+    #[test]
+    fn shorten_package_ids_no_match() {
+        assert_eq!(shorten_package_ids("bare_type"), "bare_type");
     }
 }
