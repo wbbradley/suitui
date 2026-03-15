@@ -25,6 +25,7 @@ pub struct WalletData {
     pub active_address: Option<Address>,
     pub active_env: Option<String>,
     pub config_path: PathBuf,
+    pub keystore_path: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,6 +110,13 @@ pub fn save_active_state(
     }
 }
 
+fn extract_keystore_path(value: &serde_yaml::Value) -> Option<PathBuf> {
+    value
+        .get("File")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+}
+
 pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
     let contents = std::fs::read_to_string(config_path).with_context(|| {
         format!(
@@ -174,12 +182,15 @@ pub fn load_wallet_data(config_path: &Path) -> Result<WalletData> {
         .transpose()
         .context("failed to parse active_address")?;
 
+    let keystore_path = extract_keystore_path(&raw.keystore);
+
     Ok(WalletData {
         accounts,
         envs,
         active_address,
         active_env: raw.active_env,
         config_path: config_path.to_path_buf(),
+        keystore_path,
     })
 }
 
@@ -333,5 +344,22 @@ mod tests {
                 .to_string()
                 .contains("unknown key scheme")
         );
+    }
+
+    #[test]
+    fn extract_keystore_path_from_file_variant() {
+        let value: serde_yaml::Value =
+            serde_yaml::from_str("File: /home/user/.sui/sui_config/sui.keystore").unwrap();
+        let path = extract_keystore_path(&value);
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/user/.sui/sui_config/sui.keystore"))
+        );
+    }
+
+    #[test]
+    fn extract_keystore_path_missing() {
+        let value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        assert_eq!(extract_keystore_path(&value), None);
     }
 }

@@ -40,6 +40,7 @@ struct TxHistoryCacheEntry {
 use crate::{
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
+    keystore::KeyEntry,
     object_fetcher::{
         self,
         DynFieldInfo,
@@ -116,6 +117,8 @@ pub struct App {
     pub address_input_error: Option<String>,
     pub accounts: Vec<(Address, String)>,
     pub envs: Vec<Env>,
+    #[allow(dead_code)]
+    pub keystore: Vec<KeyEntry>,
 
     pub active_address: Option<Address>,
     pub active_env: Option<String>,
@@ -188,6 +191,14 @@ impl App {
         let mut env_list_state = ListState::default();
         env_list_state.select(Some(env_idx));
 
+        let keystore = match &data.keystore_path {
+            Some(path) => crate::keystore::load_keystore(path).unwrap_or_else(|e| {
+                eprintln!("warning: failed to load keystore: {e}");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+
         let (coin_tx, coin_rx) = mpsc::unbounded_channel();
         let (chain_id_tx, chain_id_rx) = mpsc::unbounded_channel();
         let (object_tx, object_rx) = mpsc::unbounded_channel();
@@ -204,6 +215,7 @@ impl App {
             config_path: data.config_path,
             accounts,
             envs: data.envs,
+            keystore,
             focus: Focus::Accounts,
             account_list_state,
             env_dropdown_open: false,
@@ -258,6 +270,11 @@ impl App {
             self.should_quit = true;
             false
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn key_for_address(&self, addr: &Address) -> Option<&KeyEntry> {
+        self.keystore.iter().find(|k| k.address == *addr)
     }
 
     pub fn selected_account_address(&self) -> Option<Address> {
@@ -920,6 +937,7 @@ mod tests {
             active_address: Some(addrs[1]),
             active_env: Some("testnet".into()),
             config_path: PathBuf::from("/tmp/fake"),
+            keystore_path: None,
         };
         (data, addrs)
     }

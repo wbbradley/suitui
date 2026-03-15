@@ -1,6 +1,7 @@
 mod app;
 mod coin_fetcher;
 mod config;
+mod keystore;
 mod object_fetcher;
 mod transaction_fetcher;
 mod ui;
