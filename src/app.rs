@@ -566,13 +566,13 @@ impl App {
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.focus == Focus::Accounts {
-                    self.move_account_selection_clamped(self.half_page());
+                    self.move_account_selection(self.half_page());
                 }
                 AppAction::Redraw
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.focus == Focus::Accounts {
-                    self.move_account_selection_clamped(-self.half_page());
+                    self.move_account_selection(-self.half_page());
                 }
                 AppAction::Redraw
             }
@@ -694,11 +694,11 @@ impl App {
                 AppAction::None
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(self.half_page());
+                self.move_inspector_selection(self.half_page());
                 AppAction::Redraw
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(-self.half_page());
+                self.move_inspector_selection(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -726,43 +726,13 @@ impl App {
         (self.last_viewport_height / 2).max(1) as i32
     }
 
-    fn move_inspector_selection_clamped(&mut self, delta: i32) {
-        let count = self.inspector_links().len();
-        if count == 0 {
-            return;
-        }
-        let current = self.inspector_sel as i32;
-        self.inspector_sel = (current + delta).clamp(0, count as i32 - 1) as usize;
-    }
-
-    fn move_account_selection_clamped(&mut self, delta: i32) {
-        if self.accounts.is_empty() {
-            return;
-        }
-        let current = self.account_list_state.selected().unwrap_or(0) as i32;
-        let next = (current + delta).clamp(0, self.accounts.len() as i32 - 1) as usize;
-        self.account_list_state.select(Some(next));
-    }
-
-    fn move_tx_history_selection_clamped(&mut self, delta: i32) {
-        let TxHistoryState::Loaded(txs) = &self.tx_history_state else {
-            return;
-        };
-        if txs.is_empty() {
-            return;
-        }
-        let current = self.tx_history_table_state.selected().unwrap_or(0) as i32;
-        let next = (current + delta).clamp(0, txs.len() as i32 - 1) as usize;
-        self.tx_history_table_state.select(Some(next));
-    }
-
     fn move_inspector_selection(&mut self, delta: i32) {
         let count = self.inspector_links().len();
         if count == 0 {
             return;
         }
         let current = self.inspector_sel as i32;
-        self.inspector_sel = (current + delta).rem_euclid(count as i32) as usize;
+        self.inspector_sel = (current + delta).clamp(0, count as i32 - 1) as usize;
     }
 
     fn inspect_selected_link(&mut self) {
@@ -778,7 +748,7 @@ impl App {
             return;
         }
         let current = self.account_list_state.selected().unwrap_or(0) as i32;
-        let next = (current + delta).rem_euclid(self.accounts.len() as i32) as usize;
+        let next = (current + delta).clamp(0, self.accounts.len() as i32 - 1) as usize;
         self.account_list_state.select(Some(next));
     }
 
@@ -787,7 +757,7 @@ impl App {
             return;
         }
         let current = self.env_list_state.selected().unwrap_or(0) as i32;
-        let next = (current + delta).rem_euclid(self.envs.len() as i32) as usize;
+        let next = (current + delta).clamp(0, self.envs.len() as i32 - 1) as usize;
         self.env_list_state.select(Some(next));
     }
 
@@ -1041,11 +1011,11 @@ impl App {
                 AppAction::Redraw
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(self.half_page());
+                self.move_inspector_selection(self.half_page());
                 AppAction::Redraw
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(-self.half_page());
+                self.move_inspector_selection(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -1410,11 +1380,11 @@ impl App {
                 AppAction::Redraw
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(self.half_page());
+                self.move_inspector_selection(self.half_page());
                 AppAction::Redraw
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_inspector_selection_clamped(-self.half_page());
+                self.move_inspector_selection(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -1528,11 +1498,11 @@ impl App {
                 AppAction::Redraw
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_tx_history_selection_clamped(self.half_page());
+                self.move_tx_history_selection(self.half_page());
                 AppAction::Redraw
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_tx_history_selection_clamped(-self.half_page());
+                self.move_tx_history_selection(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -1547,7 +1517,7 @@ impl App {
             return;
         }
         let current = self.tx_history_table_state.selected().unwrap_or(0) as i32;
-        let next = (current + delta).rem_euclid(txs.len() as i32) as usize;
+        let next = (current + delta).clamp(0, txs.len() as i32 - 1) as usize;
         self.tx_history_table_state.select(Some(next));
     }
 
@@ -1740,21 +1710,21 @@ mod tests {
     }
 
     #[test]
-    fn navigate_wraps_around() {
+    fn navigate_clamps_at_end() {
         let (mut app, _) = test_app();
-        // Start at index 1 (bob), go down twice to wrap: 1->2->0
+        // Start at index 1 (bob), go down twice: 1->2->2 (clamped)
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(app.account_list_state.selected(), Some(0));
+        assert_eq!(app.account_list_state.selected(), Some(2));
     }
 
     #[test]
-    fn navigate_up_wraps_around() {
+    fn navigate_clamps_at_start() {
         let (mut app, _) = test_app();
-        // Start at index 1 (bob), go up twice: 1->0->2
+        // Start at index 1 (bob), go up twice: 1->0->0 (clamped)
         app.handle_key(key(KeyCode::Up));
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.account_list_state.selected(), Some(2));
+        assert_eq!(app.account_list_state.selected(), Some(0));
     }
 
     #[test]
@@ -2404,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn move_inspector_selection_wraps() {
+    fn move_inspector_selection_clamps() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
         let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
@@ -2425,9 +2395,11 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.inspector_sel, 1);
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(app.inspector_sel, 0); // wrapped
+        assert_eq!(app.inspector_sel, 1); // clamped, not wrapped
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.inspector_sel, 1); // wrapped backwards
+        assert_eq!(app.inspector_sel, 0);
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.inspector_sel, 0); // clamped, not wrapped
     }
 
     #[test]
