@@ -606,19 +606,32 @@ impl App {
                 self.address_input_error = None;
                 AppAction::Redraw
             }
-            KeyCode::Enter => match self.address_input.parse::<Address>() {
-                Ok(addr) => {
+            KeyCode::Enter => {
+                let input = self.address_input.trim().to_string();
+                if let Ok(addr) = input.parse::<Address>() {
                     self.address_input_open = false;
                     self.address_input.clear();
                     self.address_input_error = None;
                     self.push_view(View::Inspector(InspectTarget::Object(addr)));
                     AppAction::Redraw
-                }
-                Err(e) => {
-                    self.address_input_error = Some(e.to_string());
+                } else if let Ok(bytes) = bs58::decode(&input).into_vec() {
+                    if bytes.len() == 32 {
+                        self.address_input_open = false;
+                        self.address_input.clear();
+                        self.address_input_error = None;
+                        self.push_view(View::Inspector(InspectTarget::Transaction(input)));
+                        AppAction::Redraw
+                    } else {
+                        self.address_input_error =
+                            Some("Invalid Object ID, Address, or Transaction Digest".into());
+                        AppAction::Redraw
+                    }
+                } else {
+                    self.address_input_error =
+                        Some("Invalid Object ID, Address, or Transaction Digest".into());
                     AppAction::Redraw
                 }
-            },
+            }
             KeyCode::Backspace => {
                 self.address_input.pop();
                 self.address_input_error = None;

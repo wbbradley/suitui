@@ -737,7 +737,7 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
-        .title("Inspect Object")
+        .title("Inspect")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -755,8 +755,8 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(err_line, err_area);
     }
 
-    let help =
-        Paragraph::new("Enter: Inspect  Esc: Cancel").style(Style::default().fg(Color::DarkGray));
+    let help = Paragraph::new("Hex Object ID / Address, or base58 Tx Digest")
+        .style(Style::default().fg(Color::DarkGray));
     let help_area = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1),
