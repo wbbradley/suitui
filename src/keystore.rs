@@ -16,6 +16,14 @@ pub struct KeyEntry {
 }
 
 impl KeyEntry {
+    pub fn scheme(&self) -> u8 {
+        self.scheme
+    }
+
+    pub fn private_key_bytes(&self) -> [u8; 32] {
+        self.private_key_bytes
+    }
+
     #[allow(dead_code)]
     pub fn sign_transaction(&self, tx: &Transaction) -> Result<UserSignature, String> {
         match self.scheme {

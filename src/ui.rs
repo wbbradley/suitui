@@ -12,6 +12,7 @@ use crate::{
     coin_fetcher::{format_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
     transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
+    transfer_executor::TransferResult,
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -376,6 +377,8 @@ fn draw_transfer_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         TransferStep::EnterRecipient => draw_transfer_recipient(frame, app, area),
         TransferStep::EnterAmount => draw_transfer_amount(frame, app, area),
         TransferStep::Review => draw_transfer_review(frame, app, area),
+        TransferStep::Executing => draw_transfer_executing(frame, area),
+        TransferStep::Complete => draw_transfer_complete(frame, app, area),
     }
 }
 
@@ -589,6 +592,96 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(summary, summary_area);
 
     let help = Paragraph::new("Enter: Send  Esc: Back").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_transfer_executing(frame: &mut Frame, area: Rect) {
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Send — Executing")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let msg = Paragraph::new("Submitting transaction...").style(Style::default().fg(Color::Yellow));
+    let msg_area = Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1);
+    frame.render_widget(msg, msg_area);
+}
+
+fn draw_transfer_complete(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 7u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let (border_color, lines) = match &state.result {
+        Some(TransferResult::Success { digest }) => (
+            Color::Green,
+            vec![
+                Line::from(Span::styled(
+                    "Transaction submitted!",
+                    Style::default().fg(Color::Green),
+                )),
+                Line::raw(""),
+                Line::from(vec![
+                    Span::styled("Digest: ", Style::default().fg(Color::Gray)),
+                    Span::raw(digest.clone()),
+                ]),
+            ],
+        ),
+        Some(TransferResult::Error(msg)) => (
+            Color::Red,
+            vec![
+                Line::from(Span::styled(
+                    "Transaction failed",
+                    Style::default().fg(Color::Red),
+                )),
+                Line::raw(""),
+                Line::from(Span::raw(msg.clone())),
+            ],
+        ),
+        None => (Color::DarkGray, vec![Line::raw("No result")]),
+    };
+
+    let block = Block::default()
+        .title("Send — Complete")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let body = Paragraph::new(lines);
+    let body_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    frame.render_widget(body, body_area);
+
+    let help = Paragraph::new("Enter/Esc: Close").style(Style::default().fg(Color::DarkGray));
     let help_area = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1),
