@@ -524,7 +524,11 @@ fn draw_coins(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or("none");
 
     let block = Block::default()
-        .title(format!("Coins for {}", addr_label))
+        .title(format!(
+            "Coins for {} on {}",
+            addr_label,
+            app.active_env.as_deref().unwrap_or("unknown")
+        ))
         .borders(Borders::ALL)
         .border_style(border_style(app.focus, Focus::Coins));
 
