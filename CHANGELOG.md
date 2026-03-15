@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-03-15
+
+### Added
+- Auto-shorten well-known package IDs in type displays (e.g. `0x0...0002::coin::Coin` → `0x2::coin::Coin`)
+- Ctrl-d/Ctrl-u half-page scrolling in all views
+- Network name shown in coins pane title
+- Inspect modal accepts Object ID, Address, or base58 Tx Digest
+
+### Changed
+- j/k/arrow selection now clamps at list boundaries instead of wrapping around
+
 ## [0.4.0] - 2026-03-15
 
 ### Added
