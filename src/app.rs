@@ -652,11 +652,12 @@ impl App {
             }
             KeyCode::Char('a') => {
                 if matches!(&self.object_state, ObjectState::Error(msg) if msg == OBJECT_NOT_FOUND)
-                    && let View::Inspector(InspectTarget::Object(addr)) = self.current_view() {
-                        self.pop_view();
-                        self.push_view(View::Inspector(InspectTarget::Address(addr)));
-                        return AppAction::Redraw;
-                    }
+                    && let View::Inspector(InspectTarget::Object(addr)) = self.current_view()
+                {
+                    self.pop_view();
+                    self.push_view(View::Inspector(InspectTarget::Address(addr)));
+                    return AppAction::Redraw;
+                }
                 AppAction::None
             }
             _ => AppAction::None,

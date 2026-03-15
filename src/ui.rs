@@ -78,14 +78,35 @@ fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {
         TxDetailState::Loaded(detail) => {
             let selected = app.inspector_sel;
             let mut link_idx = 0usize;
+            let mut selected_line = None;
             let mut lines = Vec::new();
-            append_tx_summary_lines(&mut lines, detail, selected, &mut link_idx);
+            append_tx_summary_lines(
+                &mut lines,
+                detail,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
             append_tx_gas_lines(&mut lines, detail);
             append_tx_balance_changes_lines(&mut lines, detail);
-            append_tx_changed_objects_lines(&mut lines, detail, selected, &mut link_idx);
-            append_tx_events_lines(&mut lines, detail, selected, &mut link_idx);
+            append_tx_changed_objects_lines(
+                &mut lines,
+                detail,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
+            append_tx_events_lines(
+                &mut lines,
+                detail,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
 
-            let p = Paragraph::new(lines).block(block);
+            let visible_height = content_area.height.saturating_sub(2);
+            let scroll = compute_scroll(selected_line, visible_height);
+            let p = Paragraph::new(lines).block(block).scroll((scroll, 0));
             frame.render_widget(p, content_area);
         }
     }
@@ -98,6 +119,7 @@ fn append_tx_summary_lines<'a>(
     detail: &TransactionDetail,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     let label = Style::default().fg(Color::Gray);
 
@@ -129,6 +151,9 @@ fn append_tx_summary_lines<'a>(
     let sender_linkable = detail.sender.parse::<Address>().is_ok();
     if sender_linkable {
         let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
         let prefix = if is_selected { "> " } else { "  " };
         let value_style = if is_selected {
             Style::default()
@@ -238,6 +263,7 @@ fn append_tx_changed_objects_lines<'a>(
     detail: &TransactionDetail,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     if detail.changed_objects.is_empty() {
         return;
@@ -255,6 +281,9 @@ fn append_tx_changed_objects_lines<'a>(
         let is_linkable = obj.object_id.parse::<Address>().is_ok();
         if is_linkable {
             let is_selected = *link_idx == selected;
+            if is_selected {
+                *selected_line = Some(lines.len() as u16);
+            }
             let prefix = if is_selected { "> " } else { "  " };
             let id_style = if is_selected {
                 Style::default()
@@ -286,6 +315,7 @@ fn append_tx_events_lines<'a>(
     detail: &TransactionDetail,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     if detail.events.is_empty() {
         return;
@@ -316,6 +346,9 @@ fn append_tx_events_lines<'a>(
             && !changed_ids.contains(&evt.package_id.as_str());
         if pkg_is_link {
             let is_selected = *link_idx == selected;
+            if is_selected {
+                *selected_line = Some(lines.len() as u16);
+            }
             let prefix = if is_selected { "> " } else { "  " };
             let id_style = if is_selected {
                 Style::default()
@@ -1083,12 +1116,27 @@ fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
         ObjectState::Loaded(data) => {
             let selected = app.inspector_sel;
             let mut link_idx = 0usize;
+            let mut selected_line = None;
             let mut lines = Vec::new();
-            append_metadata_lines(&mut lines, data, selected, &mut link_idx);
+            append_metadata_lines(
+                &mut lines,
+                data,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
             append_properties_lines(&mut lines, data);
-            append_dyn_fields_lines(&mut lines, &app.dyn_fields_state, selected, &mut link_idx);
+            append_dyn_fields_lines(
+                &mut lines,
+                &app.dyn_fields_state,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
 
-            let p = Paragraph::new(lines).block(block);
+            let visible_height = content_area.height.saturating_sub(2);
+            let scroll = compute_scroll(selected_line, visible_height);
+            let p = Paragraph::new(lines).block(block).scroll((scroll, 0));
             frame.render_widget(p, content_area);
         }
     }
@@ -1123,6 +1171,7 @@ fn append_metadata_lines<'a>(
     data: &ObjectData,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     let label = Style::default().fg(Color::Gray);
 
@@ -1142,6 +1191,9 @@ fn append_metadata_lines<'a>(
     let owner_is_linkable = matches!(&data.owner, OwnerInfo::Address(a) | OwnerInfo::Object(a) if a.parse::<Address>().is_ok());
     if owner_is_linkable {
         let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
         let prefix = if is_selected { "> " } else { "  " };
         let value_style = if is_selected {
             Style::default()
@@ -1247,6 +1299,7 @@ fn append_dyn_fields_lines<'a>(
     state: &DynFieldsState,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     lines.push(Line::raw(""));
     match state {
@@ -1294,6 +1347,9 @@ fn append_dyn_fields_lines<'a>(
                             .is_some_and(|id| id.parse::<Address>().is_ok());
                     if is_linkable {
                         let is_selected = *link_idx == selected;
+                        if is_selected {
+                            *selected_line = Some(lines.len() as u16);
+                        }
                         let prefix = if is_selected { "> " } else { "  " };
                         let child = f.child_id.clone().unwrap_or_default();
                         let child_style = if is_selected {
@@ -1322,6 +1378,16 @@ fn append_dyn_fields_lines<'a>(
             }
         }
     }
+}
+
+fn compute_scroll(selected_line: Option<u16>, visible_height: u16) -> u16 {
+    let Some(sel) = selected_line else {
+        return 0;
+    };
+    if visible_height == 0 {
+        return 0;
+    }
+    sel.saturating_sub(visible_height / 3)
 }
 
 fn draw_inspector_help_bar(frame: &mut Frame, area: Rect) {
@@ -1369,11 +1435,20 @@ fn draw_address_inspector(frame: &mut Frame, app: &App, addr: Address) {
         AddressState::Loaded(data) => {
             let selected = app.inspector_sel;
             let mut link_idx = 0usize;
+            let mut selected_line = None;
             let mut lines = Vec::new();
             append_address_balances_lines(&mut lines, data);
-            append_owned_objects_lines(&mut lines, data, selected, &mut link_idx);
+            append_owned_objects_lines(
+                &mut lines,
+                data,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
 
-            let p = Paragraph::new(lines).block(block);
+            let visible_height = content_area.height.saturating_sub(2);
+            let scroll = compute_scroll(selected_line, visible_height);
+            let p = Paragraph::new(lines).block(block).scroll((scroll, 0));
             frame.render_widget(p, content_area);
         }
     }
@@ -1410,6 +1485,7 @@ fn append_owned_objects_lines<'a>(
     data: &AddressData,
     selected: usize,
     link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
 ) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
@@ -1424,6 +1500,9 @@ fn append_owned_objects_lines<'a>(
     } else {
         for obj in &data.owned_objects {
             let is_selected = *link_idx == selected;
+            if is_selected {
+                *selected_line = Some(lines.len() as u16);
+            }
             let prefix = if is_selected { "> " } else { "  " };
             let id_style = if is_selected {
                 Style::default()
@@ -1620,5 +1699,31 @@ mod tests {
         assert_eq!(format_json_scalar(&serde_json::json!(42)), "42");
         assert_eq!(format_json_scalar(&serde_json::json!(true)), "true");
         assert_eq!(format_json_scalar(&serde_json::Value::Null), "null");
+    }
+
+    #[test]
+    fn compute_scroll_no_selection() {
+        assert_eq!(compute_scroll(None, 20), 0);
+    }
+
+    #[test]
+    fn compute_scroll_selected_near_top() {
+        assert_eq!(compute_scroll(Some(3), 30), 0);
+    }
+
+    #[test]
+    fn compute_scroll_selected_far_down() {
+        assert_eq!(compute_scroll(Some(50), 30), 40);
+    }
+
+    #[test]
+    fn compute_scroll_zero_height() {
+        assert_eq!(compute_scroll(Some(10), 0), 0);
+    }
+
+    #[test]
+    fn compute_scroll_selected_at_threshold() {
+        assert_eq!(compute_scroll(Some(10), 30), 0);
+        assert_eq!(compute_scroll(Some(11), 30), 1);
     }
 }
