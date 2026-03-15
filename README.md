@@ -41,8 +41,20 @@ suitui --config /path/to/client.yaml
 | `Tab`        | Cycle focus between panes     |
 | `Enter`      | Select account or environment |
 | `e`          | Open environment selector     |
+| `i`          | Inspect object/address by ID  |
+| `t`          | Transaction history           |
+| `s`          | Send tokens                   |
+| `r`          | Refresh data                  |
 | `Esc`/`q`   | Quit (or close dropdown)      |
 | `Ctrl+C`    | Quit                          |
+
+## Features
+
+- Object and address inspector with hyperlinked navigation
+- Transaction history and transaction inspector
+- Token transfers (select coin, enter recipient/amount, review, execute)
+- Per-coin decimal-aware balance formatting
+- Keystore integration for signing transactions
 
 ## Layout
 
