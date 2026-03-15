@@ -37,7 +37,14 @@ struct TxHistoryCacheEntry {
     fetched_at: Instant,
 }
 
+struct AddressCacheEntry {
+    data: AddressData,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
 use crate::{
+    address_fetcher::{self, AddressData, AddressFetchResult},
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
     config::{Env, WalletData},
     keystore::KeyEntry,
@@ -122,10 +129,23 @@ pub enum TxHistoryState {
     Error(String),
 }
 
+pub enum AddressState {
+    Idle,
+    Loading,
+    Loaded(AddressData),
+    Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectTarget {
+    Object(Address),
+    Address(Address),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Main,
-    ObjectInspector(Address),
+    Inspector(InspectTarget),
     TransactionHistory(Address),
 }
 
@@ -189,6 +209,13 @@ pub struct App {
     tx_history_tx: mpsc::UnboundedSender<TxHistoryFetchResult>,
     pub tx_history_rx: mpsc::UnboundedReceiver<TxHistoryFetchResult>,
 
+    pub address_state: AddressState,
+    address_cache: HashMap<(Address, String), AddressCacheEntry>,
+    address_inflight: Option<(Address, String)>,
+    address_displayed_key: Option<(Address, String)>,
+    address_fetch_tx: mpsc::UnboundedSender<AddressFetchResult>,
+    pub address_fetch_rx: mpsc::UnboundedReceiver<AddressFetchResult>,
+
     pub transfer_state: Option<TransferState>,
     pub transfer_error_flash: Option<String>,
 
@@ -234,6 +261,7 @@ impl App {
         let (object_tx, object_rx) = mpsc::unbounded_channel();
         let (dyn_fields_tx, dyn_fields_rx) = mpsc::unbounded_channel();
         let (tx_history_tx, tx_history_rx) = mpsc::unbounded_channel();
+        let (address_fetch_tx, address_fetch_rx) = mpsc::unbounded_channel();
         let (transfer_exec_tx, transfer_exec_rx) = mpsc::unbounded_channel();
 
         App {
@@ -282,6 +310,12 @@ impl App {
             tx_history_displayed_key: None,
             tx_history_tx,
             tx_history_rx,
+            address_state: AddressState::Idle,
+            address_cache: HashMap::new(),
+            address_inflight: None,
+            address_displayed_key: None,
+            address_fetch_tx,
+            address_fetch_rx,
             transfer_state: None,
             transfer_error_flash: None,
             transfer_exec_tx,
@@ -323,15 +357,28 @@ impl App {
         self.envs.iter().find(|e| e.alias == *env_name)
     }
 
-    pub fn inspector_links(&self) -> Vec<Address> {
+    pub fn inspector_links(&self) -> Vec<InspectTarget> {
+        match self.current_view() {
+            View::Inspector(InspectTarget::Object(_)) => self.object_inspector_links(),
+            View::Inspector(InspectTarget::Address(_)) => self.address_inspector_links(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn object_inspector_links(&self) -> Vec<InspectTarget> {
         let mut links = Vec::new();
         let ObjectState::Loaded(data) = &self.object_state else {
             return links;
         };
         match &data.owner {
-            OwnerInfo::Address(a) | OwnerInfo::Object(a) => {
+            OwnerInfo::Address(a) => {
                 if let Ok(addr) = a.parse::<Address>() {
-                    links.push(addr);
+                    links.push(InspectTarget::Address(addr));
+                }
+            }
+            OwnerInfo::Object(a) => {
+                if let Ok(addr) = a.parse::<Address>() {
+                    links.push(InspectTarget::Object(addr));
                 }
             }
             _ => {}
@@ -341,8 +388,21 @@ impl App {
                 if let Some(id) = &f.child_id
                     && let Ok(addr) = id.parse::<Address>()
                 {
-                    links.push(addr);
+                    links.push(InspectTarget::Object(addr));
                 }
+            }
+        }
+        links
+    }
+
+    fn address_inspector_links(&self) -> Vec<InspectTarget> {
+        let mut links = Vec::new();
+        let AddressState::Loaded(data) = &self.address_state else {
+            return links;
+        };
+        for obj in &data.owned_objects {
+            if let Ok(addr) = obj.object_id.parse::<Address>() {
+                links.push(InspectTarget::Object(addr));
             }
         }
         links
@@ -355,7 +415,8 @@ impl App {
         }
         match self.current_view() {
             View::Main => self.handle_main_key(key),
-            View::ObjectInspector(_) => self.handle_object_inspector_key(key),
+            View::Inspector(InspectTarget::Object(_)) => self.handle_object_inspector_key(key),
+            View::Inspector(InspectTarget::Address(_)) => self.handle_address_inspector_key(key),
             View::TransactionHistory(_) => self.handle_tx_history_key(key),
         }
     }
@@ -485,7 +546,7 @@ impl App {
                     self.address_input_open = false;
                     self.address_input.clear();
                     self.address_input_error = None;
-                    self.push_view(View::ObjectInspector(addr));
+                    self.push_view(View::Inspector(InspectTarget::Object(addr)));
                     AppAction::Redraw
                 }
                 Err(e) => {
@@ -534,7 +595,7 @@ impl App {
     }
 
     fn force_refresh_object(&mut self) {
-        let View::ObjectInspector(addr) = self.current_view() else {
+        let View::Inspector(InspectTarget::Object(addr)) = self.current_view() else {
             return;
         };
         let Some(env) = self.active_env_info() else {
@@ -561,9 +622,9 @@ impl App {
 
     fn inspect_selected_link(&mut self) {
         let links = self.inspector_links();
-        if let Some(&addr) = links.get(self.inspector_sel) {
+        if let Some(&target) = links.get(self.inspector_sel) {
             self.inspector_sel = 0;
-            self.push_view(View::ObjectInspector(addr));
+            self.push_view(View::Inspector(target));
         }
     }
 
@@ -688,7 +749,7 @@ impl App {
     }
 
     pub fn maybe_trigger_object_fetch(&mut self) {
-        let View::ObjectInspector(addr) = self.current_view() else {
+        let View::Inspector(InspectTarget::Object(addr)) = self.current_view() else {
             return;
         };
         let Some(env) = self.active_env_info() else {
@@ -751,7 +812,7 @@ impl App {
     }
 
     pub fn maybe_trigger_dyn_fields_fetch(&mut self) {
-        let View::ObjectInspector(addr) = self.current_view() else {
+        let View::Inspector(InspectTarget::Object(addr)) = self.current_view() else {
             return;
         };
         if !matches!(self.object_state, ObjectState::Loaded(_)) {
@@ -808,6 +869,107 @@ impl App {
             match result.outcome {
                 Ok(fields) => self.dyn_fields_state = DynFieldsState::Loaded(fields),
                 Err(msg) => self.dyn_fields_state = DynFieldsState::Error(msg),
+            }
+        }
+    }
+
+    fn handle_address_inspector_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pop_view();
+                AppAction::Redraw
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_inspector_selection(-1);
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_inspector_selection(1);
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.inspect_selected_link();
+                AppAction::Redraw
+            }
+            KeyCode::Char('r') => {
+                self.force_refresh_address();
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn force_refresh_address(&mut self) {
+        let View::Inspector(InspectTarget::Address(addr)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        self.inspector_sel = 0;
+        self.address_cache.remove(&key);
+        self.address_inflight = None;
+        self.address_displayed_key = None;
+    }
+
+    pub fn maybe_trigger_address_fetch(&mut self) {
+        let View::Inspector(InspectTarget::Address(addr)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.address_state = AddressState::Idle;
+            self.address_displayed_key = None;
+            return;
+        };
+        let key = (addr, env.rpc.clone());
+        if self.address_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.address_cache.get(&key)
+            && entry.fetched_at.elapsed() < OBJECT_CACHE_TTL
+        {
+            self.address_state = if let Some(msg) = &entry.error {
+                AddressState::Error(msg.clone())
+            } else {
+                AddressState::Loaded(entry.data.clone())
+            };
+            self.address_displayed_key = Some(key);
+            return;
+        }
+        if self.address_inflight.as_ref() == Some(&key) {
+            self.address_state = AddressState::Loading;
+            self.address_displayed_key = Some(key);
+            return;
+        }
+        self.address_inflight = Some(key.clone());
+        self.address_displayed_key = Some(key.clone());
+        self.address_state = AddressState::Loading;
+        address_fetcher::spawn_address_fetch(addr, key.1, self.address_fetch_tx.clone());
+    }
+
+    pub fn handle_address_fetch_result(&mut self, result: AddressFetchResult) {
+        let key = (result.address, result.rpc_url);
+        if self.address_inflight.as_ref() == Some(&key) {
+            self.address_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(data) => AddressCacheEntry {
+                data: data.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => AddressCacheEntry {
+                data: AddressData::empty(),
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.address_cache.insert(key.clone(), entry);
+        if self.address_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(data) => self.address_state = AddressState::Loaded(data),
+                Err(msg) => self.address_state = AddressState::Error(msg),
             }
         }
     }
@@ -1188,6 +1350,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        address_fetcher,
         config::{Account, Env, WalletData},
         object_fetcher::DynFieldKind,
     };
@@ -1749,7 +1912,10 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert!(!app.address_input_open);
         assert_eq!(app.view_stack.len(), 2);
-        assert!(matches!(app.current_view(), View::ObjectInspector(_)));
+        assert!(matches!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Object(_))
+        ));
     }
 
     #[test]
@@ -1769,7 +1935,7 @@ mod tests {
     fn object_inspector_esc_pops_back() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         assert_eq!(app.view_stack.len(), 2);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.view_stack.len(), 1);
@@ -1780,7 +1946,7 @@ mod tests {
     fn object_inspector_q_pops_back() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.handle_key(key(KeyCode::Char('q')));
         assert_eq!(app.current_view(), View::Main);
     }
@@ -1789,7 +1955,7 @@ mod tests {
     async fn object_inspector_triggers_fetch() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.maybe_trigger_object_fetch();
         assert!(matches!(app.object_state, ObjectState::Loading));
         assert!(app.object_inflight.is_some());
@@ -1806,7 +1972,7 @@ mod tests {
     async fn object_fetch_idempotent() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.maybe_trigger_object_fetch();
         let key1 = app.object_inflight.clone();
         app.maybe_trigger_object_fetch();
@@ -1818,7 +1984,7 @@ mod tests {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
         let rpc_url = "https://testnet.example.com".to_string();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_inflight = Some((addr, rpc_url.clone()));
         app.object_displayed_key = Some((addr, rpc_url.clone()));
         app.object_state = ObjectState::Loading;
@@ -1851,7 +2017,7 @@ mod tests {
     fn dyn_fields_not_triggered_when_object_not_loaded() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loading;
         app.maybe_trigger_dyn_fields_fetch();
         assert!(matches!(app.dyn_fields_state, DynFieldsState::Idle));
@@ -1861,7 +2027,7 @@ mod tests {
     async fn dyn_fields_triggered_when_object_loaded() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loaded(ObjectData::empty());
         app.maybe_trigger_dyn_fields_fetch();
         assert!(matches!(app.dyn_fields_state, DynFieldsState::Loading));
@@ -1871,7 +2037,7 @@ mod tests {
     fn object_inspector_r_refreshes() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         let rpc_url = "https://testnet.example.com".to_string();
         let obj_key = (addr, rpc_url.clone());
         app.object_displayed_key = Some(obj_key.clone());
@@ -1886,7 +2052,7 @@ mod tests {
         let addr = Address::from_bytes([1u8; 32]).unwrap();
         let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
         let child_addr = Address::from_bytes([3u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loaded(ObjectData {
             owner: OwnerInfo::Address(owner_addr.to_string()),
             ..ObjectData::empty()
@@ -1907,15 +2073,15 @@ mod tests {
         ]);
         let links = app.inspector_links();
         assert_eq!(links.len(), 2);
-        assert_eq!(links[0], owner_addr);
-        assert_eq!(links[1], child_addr);
+        assert_eq!(links[0], InspectTarget::Address(owner_addr));
+        assert_eq!(links[1], InspectTarget::Object(child_addr));
     }
 
     #[test]
     fn inspector_links_empty_when_not_loaded() {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loading;
         assert!(app.inspector_links().is_empty());
     }
@@ -1926,7 +2092,7 @@ mod tests {
         let addr = Address::from_bytes([1u8; 32]).unwrap();
         let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
         let child_addr = Address::from_bytes([3u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loaded(ObjectData {
             owner: OwnerInfo::Address(owner_addr.to_string()),
             ..ObjectData::empty()
@@ -1952,7 +2118,7 @@ mod tests {
         let (mut app, _) = test_app();
         let addr = Address::from_bytes([1u8; 32]).unwrap();
         let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
-        app.push_view(View::ObjectInspector(addr));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
         app.object_state = ObjectState::Loaded(ObjectData {
             owner: OwnerInfo::Address(owner_addr.to_string()),
             ..ObjectData::empty()
@@ -1961,8 +2127,77 @@ mod tests {
         assert_eq!(app.view_stack.len(), 2);
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.view_stack.len(), 3);
-        assert_eq!(app.current_view(), View::ObjectInspector(owner_addr));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Address(owner_addr))
+        );
         assert_eq!(app.inspector_sel, 0);
+    }
+
+    #[test]
+    fn enter_on_object_owner_pushes_object_inspector() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        app.object_state = ObjectState::Loaded(ObjectData {
+            owner: OwnerInfo::Object(owner_addr.to_string()),
+            ..ObjectData::empty()
+        });
+        app.dyn_fields_state = DynFieldsState::Loaded(vec![]);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Object(owner_addr))
+        );
+    }
+
+    #[tokio::test]
+    async fn address_inspector_triggers_fetch() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Address(addr)));
+        app.maybe_trigger_address_fetch();
+        assert!(matches!(app.address_state, AddressState::Loading));
+        assert!(app.address_inflight.is_some());
+    }
+
+    #[test]
+    fn address_inspector_links_from_owned_objects() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let obj_addr = Address::from_bytes([4u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Address(addr)));
+        app.address_state = AddressState::Loaded(AddressData {
+            balances: vec![],
+            owned_objects: vec![address_fetcher::OwnedObjectSummary {
+                object_id: obj_addr.to_string(),
+                object_type: "0x2::coin::Coin<0x2::sui::SUI>".into(),
+            }],
+        });
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], InspectTarget::Object(obj_addr));
+    }
+
+    #[test]
+    fn address_inspector_enter_pushes_object_inspector() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let obj_addr = Address::from_bytes([4u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Address(addr)));
+        app.address_state = AddressState::Loaded(AddressData {
+            balances: vec![],
+            owned_objects: vec![address_fetcher::OwnedObjectSummary {
+                object_id: obj_addr.to_string(),
+                object_type: "0x2::coin::Coin<0x2::sui::SUI>".into(),
+            }],
+        });
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Object(obj_addr))
+        );
     }
 
     // --- Transfer tests ---

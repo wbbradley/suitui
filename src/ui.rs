@@ -8,7 +8,19 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, DynFieldsState, Focus, ObjectState, TransferStep, TxHistoryState, View},
+    address_fetcher::AddressData,
+    app::{
+        AddressState,
+        App,
+        CoinState,
+        DynFieldsState,
+        Focus,
+        InspectTarget,
+        ObjectState,
+        TransferStep,
+        TxHistoryState,
+        View,
+    },
     coin_fetcher::{format_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
     transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
@@ -18,7 +30,10 @@ use crate::{
 pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.current_view() {
         View::Main => draw_main(frame, app),
-        View::ObjectInspector(addr) => draw_object_inspector(frame, app, addr),
+        View::Inspector(InspectTarget::Object(addr)) => draw_object_inspector(frame, app, addr),
+        View::Inspector(InspectTarget::Address(addr)) => {
+            draw_address_inspector(frame, app, addr);
+        }
         View::TransactionHistory(addr) => draw_transaction_history(frame, app, addr),
     }
 }
@@ -963,6 +978,111 @@ fn draw_inspector_help_bar(frame: &mut Frame, area: Rect) {
         Span::raw(": Refresh"),
     ]));
     frame.render_widget(help, area);
+}
+
+fn draw_address_inspector(frame: &mut Frame, app: &App, addr: Address) {
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+    let content_area = outer[0];
+    let help_area = outer[1];
+
+    let block = Block::default()
+        .title(format!("Address Inspector: {}", addr))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &app.address_state {
+        AddressState::Idle | AddressState::Loading => {
+            let msg = if matches!(app.address_state, AddressState::Loading) {
+                "Loading address data..."
+            } else {
+                "Waiting..."
+            };
+            let p = Paragraph::new(format!("  {msg}"))
+                .style(Style::default().fg(Color::Yellow))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        AddressState::Error(msg) => {
+            let p = Paragraph::new(format!("  Error: {msg}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        AddressState::Loaded(data) => {
+            let selected = app.inspector_sel;
+            let mut link_idx = 0usize;
+            let mut lines = Vec::new();
+            append_address_balances_lines(&mut lines, data);
+            append_owned_objects_lines(&mut lines, data, selected, &mut link_idx);
+
+            let p = Paragraph::new(lines).block(block);
+            frame.render_widget(p, content_area);
+        }
+    }
+
+    draw_inspector_help_bar(frame, help_area);
+}
+
+fn append_address_balances_lines<'a>(lines: &mut Vec<Line<'a>>, data: &AddressData) {
+    lines.push(Line::styled(
+        format!("  ── Balances ({}) ──", data.balances.len()),
+        Style::default().fg(Color::Cyan),
+    ));
+    if data.balances.is_empty() {
+        lines.push(Line::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for b in &data.balances {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    short_coin_type(&b.coin_type).to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(format!("  {}", format_balance(b.total_balance, 9))),
+            ]));
+        }
+    }
+}
+
+fn append_owned_objects_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    data: &AddressData,
+    selected: usize,
+    link_idx: &mut usize,
+) {
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("  ── Owned Objects ({}) ──", data.owned_objects.len()),
+        Style::default().fg(Color::Cyan),
+    ));
+    if data.owned_objects.is_empty() {
+        lines.push(Line::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for obj in &data.owned_objects {
+            let is_selected = *link_idx == selected;
+            let prefix = if is_selected { "> " } else { "  " };
+            let id_style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let short_type = short_coin_type(&obj.object_type);
+            lines.push(Line::from(vec![
+                Span::raw(prefix.to_string()),
+                Span::styled(obj.object_id.clone(), id_style),
+                Span::raw(format!("  {short_type}")),
+            ]));
+            *link_idx += 1;
+        }
+    }
 }
 
 fn draw_transaction_history(frame: &mut Frame, app: &mut App, addr: Address) {
