@@ -395,7 +395,7 @@ impl App {
         match self.current_view() {
             View::Inspector(InspectTarget::Object(_)) => self.object_inspector_links(),
             View::Inspector(InspectTarget::Address(_)) => self.address_inspector_links(),
-            View::Inspector(InspectTarget::Transaction(_)) => vec![],
+            View::Inspector(InspectTarget::Transaction(_)) => self.tx_inspector_links(),
             _ => Vec::new(),
         }
     }
@@ -437,6 +437,29 @@ impl App {
         };
         for obj in &data.owned_objects {
             if let Ok(addr) = obj.object_id.parse::<Address>() {
+                links.push(InspectTarget::Object(addr));
+            }
+        }
+        links
+    }
+
+    fn tx_inspector_links(&self) -> Vec<InspectTarget> {
+        let mut links = Vec::new();
+        let TxDetailState::Loaded(detail) = &self.tx_detail_state else {
+            return links;
+        };
+        if let Ok(addr) = detail.sender.parse::<Address>() {
+            links.push(InspectTarget::Address(addr));
+        }
+        for obj in &detail.changed_objects {
+            if let Ok(addr) = obj.object_id.parse::<Address>() {
+                links.push(InspectTarget::Object(addr));
+            }
+        }
+        for evt in &detail.events {
+            if let Ok(addr) = evt.package_id.parse::<Address>()
+                && !links.contains(&InspectTarget::Object(addr))
+            {
                 links.push(InspectTarget::Object(addr));
             }
         }
@@ -1276,8 +1299,38 @@ impl App {
                 self.pop_view();
                 AppAction::Redraw
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_inspector_selection(-1);
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_inspector_selection(1);
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.inspect_selected_link();
+                AppAction::Redraw
+            }
+            KeyCode::Char('r') => {
+                self.force_refresh_tx_detail();
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
+    }
+
+    fn force_refresh_tx_detail(&mut self) {
+        let View::Inspector(InspectTarget::Transaction(ref digest)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (digest.clone(), env.rpc.clone());
+        self.inspector_sel = 0;
+        self.tx_detail_cache.remove(&key);
+        self.tx_detail_inflight = None;
+        self.tx_detail_displayed_key = None;
     }
 
     pub fn maybe_trigger_tx_detail_fetch(&mut self) {
@@ -1354,6 +1407,19 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_tx_history_selection(1);
                 AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                let TxHistoryState::Loaded(txs) = &self.tx_history_state else {
+                    return AppAction::None;
+                };
+                let idx = self.tx_history_table_state.selected().unwrap_or(0);
+                if let Some(tx) = txs.get(idx) {
+                    let digest = tx.digest.clone();
+                    self.push_view(View::Inspector(InspectTarget::Transaction(digest)));
+                    AppAction::Redraw
+                } else {
+                    AppAction::None
+                }
             }
             KeyCode::Char('r') => {
                 self.force_refresh_tx_history();
@@ -1465,6 +1531,7 @@ mod tests {
         address_fetcher,
         config::{Account, Env, WalletData},
         object_fetcher::DynFieldKind,
+        transaction_fetcher::{TxDetailChangedObject, TxDetailEvent},
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2811,5 +2878,149 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.view_stack.len(), 1);
         assert_eq!(app.current_view(), View::Main);
+    }
+
+    #[test]
+    fn enter_on_tx_history_pushes_transaction_inspector() {
+        let (mut app, addrs) = test_app();
+        let addr = addrs[0];
+        app.push_view(View::TransactionHistory(addr));
+        let digest = "txdigest123".to_string();
+        app.tx_history_state = TxHistoryState::Loaded(vec![TransactionSummary {
+            digest: digest.clone(),
+            timestamp: None,
+            success: Some(true),
+            gas_used: None,
+            balance_changes: vec![],
+        }]);
+        app.tx_history_table_state.select(Some(0));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Transaction(digest))
+        );
+    }
+
+    #[test]
+    fn tx_inspector_esc_pops_back() {
+        let (mut app, addrs) = test_app();
+        app.push_view(View::TransactionHistory(addrs[0]));
+        app.push_view(View::Inspector(InspectTarget::Transaction("abc".into())));
+        assert_eq!(app.view_stack.len(), 3);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view_stack.len(), 2);
+        assert!(matches!(app.current_view(), View::TransactionHistory(_)));
+    }
+
+    #[test]
+    fn tx_inspector_links_from_loaded_detail() {
+        let (mut app, _) = test_app();
+        let sender_addr = Address::from_bytes([0xaa; 32]).unwrap();
+        let obj_addr = Address::from_bytes([0xbb; 32]).unwrap();
+        let evt_addr = Address::from_bytes([0xcc; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: sender_addr.to_string(),
+            success: Some(true),
+            gas_used: None,
+            changed_objects: vec![TxDetailChangedObject {
+                object_id: obj_addr.to_string(),
+                object_type: "0x2::coin::Coin".into(),
+                id_operation: "Modified".into(),
+            }],
+            events: vec![TxDetailEvent {
+                package_id: evt_addr.to_string(),
+                module: "test".into(),
+                sender: sender_addr.to_string(),
+                event_type: "TestEvent".into(),
+                json: None,
+            }],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], InspectTarget::Address(sender_addr));
+        assert_eq!(links[1], InspectTarget::Object(obj_addr));
+        assert_eq!(links[2], InspectTarget::Object(evt_addr));
+    }
+
+    #[test]
+    fn tx_inspector_links_deduplicates_event_package() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([0xdd; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: String::new(),
+            success: None,
+            gas_used: None,
+            changed_objects: vec![TxDetailChangedObject {
+                object_id: addr.to_string(),
+                object_type: "pkg".into(),
+                id_operation: "Created".into(),
+            }],
+            events: vec![TxDetailEvent {
+                package_id: addr.to_string(),
+                module: "m".into(),
+                sender: String::new(),
+                event_type: "E".into(),
+                json: None,
+            }],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        // sender is empty/invalid so not included; object and event share same addr → deduplicated
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], InspectTarget::Object(addr));
+    }
+
+    #[test]
+    fn tx_inspector_enter_follows_link() {
+        let (mut app, _) = test_app();
+        let sender_addr = Address::from_bytes([0xee; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: sender_addr.to_string(),
+            success: None,
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![],
+            balance_changes: vec![],
+        });
+        app.inspector_sel = 0;
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Address(sender_addr))
+        );
+    }
+
+    #[test]
+    fn tx_inspector_r_refreshes() {
+        let (mut app, _) = test_app();
+        let digest = "abc123".to_string();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.push_view(View::Inspector(InspectTarget::Transaction(digest.clone())));
+        app.tx_detail_cache.insert(
+            (digest, rpc_url),
+            TxDetailCacheEntry {
+                data: TransactionDetail::empty(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        assert_eq!(app.tx_detail_cache.len(), 1);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.tx_detail_cache.len(), 0);
+        assert!(app.tx_detail_inflight.is_none());
+        assert!(app.tx_detail_displayed_key.is_none());
     }
 }
