@@ -1,3 +1,5 @@
+pub const OBJECT_NOT_FOUND: &str = "object not found";
+
 use futures::StreamExt;
 use prost_types::FieldMask;
 use sui_rpc::{
@@ -122,8 +124,15 @@ async fn fetch_object(object_id: &Address, rpc_url: &str) -> Result<ObjectData, 
         .ledger_client()
         .get_object(request)
         .await
-        .map_err(|e| e.to_string())?;
-    let obj = resp.into_inner().object.ok_or("no object returned")?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("NOT_FOUND") {
+                OBJECT_NOT_FOUND.to_string()
+            } else {
+                msg
+            }
+        })?;
+    let obj = resp.into_inner().object.ok_or(OBJECT_NOT_FOUND)?;
     Ok(convert_object(&obj))
 }
 

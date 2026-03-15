@@ -23,13 +23,8 @@ use crate::{
         View,
     },
     coin_fetcher::{SUI_DECIMALS, format_balance, format_signed_balance, short_coin_type},
-    object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
-    transaction_fetcher::{
-        self,
-        TransactionDetail,
-        TransactionSummary,
-        TxBalanceChange,
-    },
+    object_fetcher::{DynFieldKind, OBJECT_NOT_FOUND, ObjectData, OwnerInfo},
+    transaction_fetcher::{self, TransactionDetail, TransactionSummary, TxBalanceChange},
     transfer_executor::TransferResult,
 };
 
@@ -1051,9 +1046,38 @@ fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
             frame.render_widget(p, content_area);
         }
         ObjectState::Error(msg) => {
-            let p = Paragraph::new(format!("  Error: {msg}"))
-                .style(Style::default().fg(Color::Red))
-                .block(block);
+            let lines = if msg == OBJECT_NOT_FOUND {
+                vec![
+                    Line::from(""),
+                    Line::styled("  Object not found", Style::default().fg(Color::Yellow)),
+                    Line::from(""),
+                    Line::styled(
+                        "  Sui addresses and object IDs are both 32-byte hex values",
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Line::styled(
+                        "  and can look identical. This ID may be an address instead.",
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw("  Press "),
+                        Span::styled(
+                            "a",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" to try inspecting as an address."),
+                    ]),
+                ]
+            } else {
+                vec![Line::styled(
+                    format!("  Error: {msg}"),
+                    Style::default().fg(Color::Red),
+                )]
+            };
+            let p = Paragraph::new(lines).block(block);
             frame.render_widget(p, content_area);
         }
         ObjectState::Loaded(data) => {
@@ -1069,7 +1093,19 @@ fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
         }
     }
 
-    draw_inspector_help_bar(frame, help_area);
+    if matches!(&app.object_state, ObjectState::Error(msg) if msg == OBJECT_NOT_FOUND) {
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(": Back  "),
+            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::raw(": Try as Address  "),
+            Span::styled("r", Style::default().fg(Color::Cyan)),
+            Span::raw(": Refresh"),
+        ]));
+        frame.render_widget(help, help_area);
+    } else {
+        draw_inspector_help_bar(frame, help_area);
+    }
 }
 
 fn format_owner(owner: &OwnerInfo) -> String {

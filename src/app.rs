@@ -58,6 +58,7 @@ use crate::{
         self,
         DynFieldInfo,
         DynFieldsFetchResult,
+        OBJECT_NOT_FOUND,
         ObjectData,
         ObjectFetchResult,
         OwnerInfo,
@@ -648,6 +649,15 @@ impl App {
             KeyCode::Char('r') => {
                 self.force_refresh_object();
                 AppAction::Redraw
+            }
+            KeyCode::Char('a') => {
+                if matches!(&self.object_state, ObjectState::Error(msg) if msg == OBJECT_NOT_FOUND)
+                    && let View::Inspector(InspectTarget::Object(addr)) = self.current_view() {
+                        self.pop_view();
+                        self.push_view(View::Inspector(InspectTarget::Address(addr)));
+                        return AppAction::Redraw;
+                    }
+                AppAction::None
             }
             _ => AppAction::None,
         }
@@ -2189,9 +2199,35 @@ mod tests {
         app.handle_object_result(ObjectFetchResult {
             object_id: addr,
             rpc_url,
-            outcome: Err("not found".into()),
+            outcome: Err(OBJECT_NOT_FOUND.to_string()),
         });
         assert!(matches!(app.object_state, ObjectState::Error(_)));
+    }
+
+    #[test]
+    fn object_not_found_a_key_switches_to_address_inspector() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        app.object_state = ObjectState::Error(OBJECT_NOT_FOUND.to_string());
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Address(addr))
+        );
+    }
+
+    #[test]
+    fn object_other_error_a_key_does_nothing() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        app.object_state = ObjectState::Error("network error".to_string());
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Object(addr))
+        );
     }
 
     #[test]
