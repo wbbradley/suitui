@@ -77,7 +77,10 @@ pub fn parse_amount(input: &str, decimals: u32) -> Result<u64, String> {
 }
 
 pub fn short_coin_type(full: &str) -> &str {
-    full.rsplit("::").next().unwrap_or(full)
+    full.rsplit("::")
+        .next()
+        .unwrap_or(full)
+        .trim_end_matches('>')
 }
 
 pub async fn fetch_coin_decimals(client: &mut Client, coin_type: &str) -> u32 {
@@ -244,6 +247,11 @@ mod tests {
     #[test]
     fn short_coin_type_bare() {
         assert_eq!(short_coin_type("bare"), "bare");
+    }
+
+    #[test]
+    fn short_coin_type_generic() {
+        assert_eq!(short_coin_type("0x2::coin::Coin<0x2::sui::SUI>"), "SUI");
     }
 
     #[test]
