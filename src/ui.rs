@@ -29,6 +29,7 @@ use crate::{
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.last_viewport_height = frame.area().height;
     match app.current_view() {
         View::Main => draw_main(frame, app),
         View::Inspector(InspectTarget::Object(addr)) => draw_object_inspector(frame, app, addr),

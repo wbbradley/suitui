@@ -243,6 +243,8 @@ pub struct App {
     transfer_exec_tx: mpsc::UnboundedSender<TransferExecuteResult>,
     pub transfer_exec_rx: mpsc::UnboundedReceiver<TransferExecuteResult>,
 
+    pub last_viewport_height: u16,
+
     pub tx_detail_state: TxDetailState,
     tx_detail_cache: HashMap<(String, String), TxDetailCacheEntry>,
     tx_detail_inflight: Option<(String, String)>,
@@ -349,6 +351,7 @@ impl App {
             transfer_error_flash: None,
             transfer_exec_tx,
             transfer_exec_rx,
+            last_viewport_height: 0,
             tx_detail_state: TxDetailState::Idle,
             tx_detail_cache: HashMap::new(),
             tx_detail_inflight: None,
@@ -561,6 +564,18 @@ impl App {
                 }
                 AppAction::Redraw
             }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focus == Focus::Accounts {
+                    self.move_account_selection_clamped(self.half_page());
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focus == Focus::Accounts {
+                    self.move_account_selection_clamped(-self.half_page());
+                }
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
     }
@@ -678,6 +693,14 @@ impl App {
                 }
                 AppAction::None
             }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(self.half_page());
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(-self.half_page());
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
     }
@@ -697,6 +720,40 @@ impl App {
         self.dyn_fields_cache.remove(&key);
         self.dyn_fields_inflight = None;
         self.dyn_fields_displayed_key = None;
+    }
+
+    fn half_page(&self) -> i32 {
+        (self.last_viewport_height / 2).max(1) as i32
+    }
+
+    fn move_inspector_selection_clamped(&mut self, delta: i32) {
+        let count = self.inspector_links().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.inspector_sel as i32;
+        self.inspector_sel = (current + delta).clamp(0, count as i32 - 1) as usize;
+    }
+
+    fn move_account_selection_clamped(&mut self, delta: i32) {
+        if self.accounts.is_empty() {
+            return;
+        }
+        let current = self.account_list_state.selected().unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, self.accounts.len() as i32 - 1) as usize;
+        self.account_list_state.select(Some(next));
+    }
+
+    fn move_tx_history_selection_clamped(&mut self, delta: i32) {
+        let TxHistoryState::Loaded(txs) = &self.tx_history_state else {
+            return;
+        };
+        if txs.is_empty() {
+            return;
+        }
+        let current = self.tx_history_table_state.selected().unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, txs.len() as i32 - 1) as usize;
+        self.tx_history_table_state.select(Some(next));
     }
 
     fn move_inspector_selection(&mut self, delta: i32) {
@@ -981,6 +1038,14 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.force_refresh_address();
+                AppAction::Redraw
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(self.half_page());
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
@@ -1344,6 +1409,14 @@ impl App {
                 self.force_refresh_tx_detail();
                 AppAction::Redraw
             }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(self.half_page());
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection_clamped(-self.half_page());
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
     }
@@ -1452,6 +1525,14 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.force_refresh_tx_history();
+                AppAction::Redraw
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_tx_history_selection_clamped(self.half_page());
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_tx_history_selection_clamped(-self.half_page());
                 AppAction::Redraw
             }
             _ => AppAction::None,
