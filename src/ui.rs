@@ -813,7 +813,7 @@ fn draw_transfer_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     match state.step {
         TransferStep::SelectCoin => draw_transfer_select_coin(frame, app, area),
-        TransferStep::EnterRecipient => draw_transfer_recipient(frame, app, area),
+        TransferStep::SelectRecipient => draw_transfer_recipient(frame, app, area),
         TransferStep::EnterAmount => draw_transfer_amount(frame, app, area),
         TransferStep::Review => draw_transfer_review(frame, app, area),
         TransferStep::Executing => draw_transfer_executing(frame, app, area),
@@ -886,48 +886,113 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_transfer_recipient(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(state) = &app.transfer_state else {
+    let Some(state) = &mut app.transfer_state else {
         return;
     };
-    let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 6u16 + TRANSFER_HEADER_LINES;
-    let x = (area.width.saturating_sub(width)) / 2 + area.x;
-    let y = (area.height.saturating_sub(height)) / 2 + area.y;
-    let modal_area = Rect::new(x, y, width, height);
 
-    frame.render_widget(Clear, modal_area);
+    if state.recipient_external_mode {
+        // External address text input mode
+        let width = 60u16.min(area.width.saturating_sub(4));
+        let height = (6u16 + TRANSFER_HEADER_LINES).min(area.height.saturating_sub(2));
+        let x = (area.width.saturating_sub(width)) / 2 + area.x;
+        let y = (area.height.saturating_sub(height)) / 2 + area.y;
+        let modal_area = Rect::new(x, y, width, height);
 
-    let block = Block::default()
-        .title("Send — Recipient (2/4)")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(Clear, modal_area);
 
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
+        let block = Block::default()
+            .title("Send — Recipient (2/4)")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
 
-    render_transfer_header(frame, state, inner);
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
 
-    let content_top = inner.y + TRANSFER_HEADER_LINES;
+        render_transfer_header(frame, state, inner);
 
-    let input_line = format!("{}█", &state.recipient_input);
-    let input = Paragraph::new(input_line);
-    let input_area = Rect::new(inner.x, content_top, inner.width, 1);
-    frame.render_widget(input, input_area);
+        let content_top = inner.y + TRANSFER_HEADER_LINES;
 
-    if let Some(err) = &state.recipient_error {
-        let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
-        let err_area = Rect::new(inner.x, content_top + 1, inner.width, 1);
-        frame.render_widget(err_line, err_area);
+        let input_line = format!("{}█", &state.recipient_input);
+        let input = Paragraph::new(input_line);
+        let input_area = Rect::new(inner.x, content_top, inner.width, 1);
+        frame.render_widget(input, input_area);
+
+        if let Some(err) = &state.recipient_error {
+            let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
+            let err_area = Rect::new(inner.x, content_top + 1, inner.width, 1);
+            frame.render_widget(err_line, err_area);
+        }
+
+        let help = Paragraph::new("Enter: Next  Esc: Back to list")
+            .style(Style::default().fg(Color::DarkGray));
+        let help_area = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        );
+        frame.render_widget(help, help_area);
+    } else {
+        // Account list mode
+        let item_count = app.accounts.len() + 1;
+        let state = app.transfer_state.as_mut().unwrap();
+        let width = 50u16.min(area.width.saturating_sub(4));
+        let height =
+            (item_count as u16 + 4 + TRANSFER_HEADER_LINES).min(area.height.saturating_sub(2));
+        let x = (area.width.saturating_sub(width)) / 2 + area.x;
+        let y = (area.height.saturating_sub(height)) / 2 + area.y;
+        let modal_area = Rect::new(x, y, width, height);
+
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title("Send — Recipient (2/4)")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        render_transfer_header(frame, state, inner);
+
+        let mut items: Vec<ListItem> = app
+            .accounts
+            .iter()
+            .map(|(addr, alias)| {
+                let label = format!("{} ({})", alias, short_address(addr));
+                ListItem::new(label)
+            })
+            .collect();
+        items.push(ListItem::new("External address..."));
+
+        let content_top = inner.y + TRANSFER_HEADER_LINES;
+        let list_height = inner
+            .height
+            .saturating_sub(TRANSFER_HEADER_LINES)
+            .saturating_sub(1);
+        let list_area = Rect::new(inner.x, content_top, inner.width, list_height);
+
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+
+        let state = app.transfer_state.as_mut().unwrap();
+        frame.render_stateful_widget(list, list_area, &mut state.recipient_list_state);
+
+        let help = Paragraph::new("Enter: Select  j/k: Navigate  Esc: Back")
+            .style(Style::default().fg(Color::DarkGray));
+        let help_area = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        );
+        frame.render_widget(help, help_area);
     }
-
-    let help = Paragraph::new("Enter: Next  Esc: Back").style(Style::default().fg(Color::DarkGray));
-    let help_area = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
-    );
-    frame.render_widget(help, help_area);
 }
 
 fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {

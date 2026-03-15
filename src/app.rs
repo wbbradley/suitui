@@ -77,7 +77,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStep {
     SelectCoin,
-    EnterRecipient,
+    SelectRecipient,
     EnterAmount,
     Review,
     Executing,
@@ -93,6 +93,8 @@ pub struct TransferState {
     pub is_mainnet: bool,
     pub balances: Vec<CoinBalance>,
     pub coin_list_state: ListState,
+    pub recipient_list_state: ListState,
+    pub recipient_external_mode: bool,
     pub recipient_input: String,
     pub recipient_error: Option<String>,
     pub recipient: Option<Address>,
@@ -1136,6 +1138,8 @@ impl App {
         };
         let mut coin_list_state = ListState::default();
         coin_list_state.select(Some(0));
+        let mut recipient_list_state = ListState::default();
+        recipient_list_state.select(Some(0));
         self.transfer_state = Some(TransferState {
             step: TransferStep::SelectCoin,
             sender: addr,
@@ -1145,6 +1149,8 @@ impl App {
             is_mainnet,
             balances,
             coin_list_state,
+            recipient_list_state,
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -1162,7 +1168,7 @@ impl App {
         };
         match state.step {
             TransferStep::SelectCoin => self.handle_transfer_select_coin(key),
-            TransferStep::EnterRecipient => self.handle_transfer_recipient(key),
+            TransferStep::SelectRecipient => self.handle_transfer_select_recipient(key),
             TransferStep::EnterAmount => self.handle_transfer_amount(key),
             TransferStep::Review => self.handle_transfer_review(key),
             TransferStep::Executing => AppAction::Redraw,
@@ -1202,7 +1208,7 @@ impl App {
                 if let Some(state) = &mut self.transfer_state
                     && state.coin_list_state.selected().is_some()
                 {
-                    state.step = TransferStep::EnterRecipient;
+                    state.step = TransferStep::SelectRecipient;
                 }
                 AppAction::Redraw
             }
@@ -1210,17 +1216,18 @@ impl App {
         }
     }
 
-    fn handle_transfer_recipient(&mut self, key: KeyEvent) -> AppAction {
-        match key.code {
-            KeyCode::Esc => {
-                if let Some(state) = &mut self.transfer_state {
-                    state.step = TransferStep::SelectCoin;
+    fn handle_transfer_select_recipient(&mut self, key: KeyEvent) -> AppAction {
+        let Some(state) = &mut self.transfer_state else {
+            return AppAction::None;
+        };
+        if state.recipient_external_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    state.recipient_external_mode = false;
                     state.recipient_error = None;
+                    AppAction::Redraw
                 }
-                AppAction::Redraw
-            }
-            KeyCode::Enter => {
-                if let Some(state) = &mut self.transfer_state {
+                KeyCode::Enter => {
                     match state.recipient_input.parse::<Address>() {
                         Ok(addr) => {
                             state.recipient = Some(addr);
@@ -1231,24 +1238,58 @@ impl App {
                             state.recipient_error = Some(e.to_string());
                         }
                     }
+                    AppAction::Redraw
                 }
-                AppAction::Redraw
-            }
-            KeyCode::Backspace => {
-                if let Some(state) = &mut self.transfer_state {
+                KeyCode::Backspace => {
                     state.recipient_input.pop();
                     state.recipient_error = None;
+                    AppAction::Redraw
                 }
-                AppAction::Redraw
-            }
-            KeyCode::Char(c) => {
-                if let Some(state) = &mut self.transfer_state {
+                KeyCode::Char(c) => {
                     state.recipient_input.push(c);
                     state.recipient_error = None;
+                    AppAction::Redraw
                 }
-                AppAction::Redraw
+                _ => AppAction::None,
             }
-            _ => AppAction::None,
+        } else {
+            let item_count = self.accounts.len() + 1;
+            let Some(state) = &mut self.transfer_state else {
+                return AppAction::None;
+            };
+            match key.code {
+                KeyCode::Esc => {
+                    state.step = TransferStep::SelectCoin;
+                    state.recipient_error = None;
+                    AppAction::Redraw
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let current = state.recipient_list_state.selected().unwrap_or(0) as i32;
+                    let next = (current - 1).clamp(0, item_count as i32 - 1) as usize;
+                    state.recipient_list_state.select(Some(next));
+                    AppAction::Redraw
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let current = state.recipient_list_state.selected().unwrap_or(0) as i32;
+                    let next = (current + 1).clamp(0, item_count as i32 - 1) as usize;
+                    state.recipient_list_state.select(Some(next));
+                    AppAction::Redraw
+                }
+                KeyCode::Enter => {
+                    let selected = state.recipient_list_state.selected().unwrap_or(0);
+                    if selected < item_count - 1 {
+                        let addr = self.accounts[selected].0;
+                        let state = self.transfer_state.as_mut().unwrap();
+                        state.recipient = Some(addr);
+                        state.recipient_error = None;
+                        state.step = TransferStep::EnterAmount;
+                    } else {
+                        state.recipient_external_mode = true;
+                    }
+                    AppAction::Redraw
+                }
+                _ => AppAction::None,
+            }
         }
     }
 
@@ -1256,7 +1297,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(state) = &mut self.transfer_state {
-                    state.step = TransferStep::EnterRecipient;
+                    state.step = TransferStep::SelectRecipient;
                     state.amount_error = None;
                 }
                 AppAction::Redraw
@@ -2629,8 +2670,17 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(
             app.transfer_state.as_ref().unwrap().step,
-            TransferStep::EnterRecipient
+            TransferStep::SelectRecipient
         );
+    }
+
+    /// Navigate to "External address..." in the recipient list and press Enter.
+    fn enter_external_recipient_mode(app: &mut App) {
+        // 3 accounts → "External..." is at index 3
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
     }
 
     #[test]
@@ -2638,6 +2688,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         app.handle_key(key(KeyCode::Char('0')));
         app.handle_key(key(KeyCode::Char('x')));
         app.handle_key(key(KeyCode::Char('a')));
@@ -2649,6 +2700,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2663,12 +2715,13 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "not_hex".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
         app.handle_key(key(KeyCode::Enter));
         let state = app.transfer_state.as_ref().unwrap();
-        assert_eq!(state.step, TransferStep::EnterRecipient);
+        assert_eq!(state.step, TransferStep::SelectRecipient);
         assert!(state.recipient_error.is_some());
     }
 
@@ -2677,6 +2730,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2693,6 +2747,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2711,6 +2766,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2733,6 +2789,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2752,6 +2809,7 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2790,6 +2848,8 @@ mod tests {
             is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -2816,6 +2876,8 @@ mod tests {
             is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -2840,6 +2902,8 @@ mod tests {
             is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -2872,6 +2936,8 @@ mod tests {
             is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -2902,6 +2968,8 @@ mod tests {
             is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
             recipient_input: String::new(),
             recipient_error: None,
             recipient: None,
@@ -2961,17 +3029,126 @@ mod tests {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
         for c in "0x2".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
         app.handle_key(key(KeyCode::Enter)); // recipient → amount
         app.handle_key(key(KeyCode::Char('1')));
-        // Go back to recipient
+        // Go back to recipient — lands on SelectRecipient (list mode, not external)
         app.handle_key(key(KeyCode::Esc));
         let state = app.transfer_state.as_ref().unwrap();
-        assert_eq!(state.step, TransferStep::EnterRecipient);
+        assert_eq!(state.step, TransferStep::SelectRecipient);
         assert_eq!(state.recipient_input, "0x2");
         assert_eq!(state.amount_input, "1");
+    }
+
+    #[test]
+    fn recipient_list_navigate() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin → recipient list
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::SelectRecipient);
+        assert_eq!(state.recipient_list_state.selected(), Some(0));
+        // Navigate down to "External..." (index 3 with 3 accounts)
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .recipient_list_state
+                .selected(),
+            Some(1)
+        );
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .recipient_list_state
+                .selected(),
+            Some(3)
+        );
+        // Clamp at end
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .recipient_list_state
+                .selected(),
+            Some(3)
+        );
+        // Navigate back up
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .recipient_list_state
+                .selected(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn recipient_select_known_account() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        // Select alice (index 0, the default)
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert_eq!(state.recipient, Some(addrs[0]));
+    }
+
+    #[test]
+    fn recipient_enter_external_mode() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::SelectRecipient);
+        assert!(state.recipient_external_mode);
+    }
+
+    #[test]
+    fn recipient_external_esc_returns_to_list() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        enter_external_recipient_mode(&mut app);
+        // Type some chars
+        app.handle_key(key(KeyCode::Char('0')));
+        app.handle_key(key(KeyCode::Char('x')));
+        // Esc back to list
+        app.handle_key(key(KeyCode::Esc));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(!state.recipient_external_mode);
+        assert_eq!(state.step, TransferStep::SelectRecipient);
+        // Input is preserved
+        assert_eq!(state.recipient_input, "0x");
+    }
+
+    #[test]
+    fn recipient_select_known_account_preserves_on_back() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        // Select alice (index 0)
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert_eq!(state.recipient, Some(addrs[0]));
+        // Esc back to recipient
+        app.handle_key(key(KeyCode::Esc));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::SelectRecipient);
+        assert!(!state.recipient_external_mode);
     }
 
     #[test]
