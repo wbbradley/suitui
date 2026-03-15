@@ -463,6 +463,11 @@ impl App {
             {
                 links.push(InspectTarget::Object(addr));
             }
+            if let Ok(addr) = evt.sender.parse::<Address>()
+                && !links.contains(&InspectTarget::Address(addr))
+            {
+                links.push(InspectTarget::Address(addr));
+            }
         }
         links
     }
@@ -3014,6 +3019,108 @@ mod tests {
         // sender is empty/invalid so not included; object and event share same addr → deduplicated
         assert_eq!(links.len(), 1);
         assert_eq!(links[0], InspectTarget::Object(addr));
+    }
+
+    #[test]
+    fn tx_inspector_links_includes_event_sender() {
+        let (mut app, _) = test_app();
+        let tx_sender = Address::from_bytes([0xaa; 32]).unwrap();
+        let pkg_addr = Address::from_bytes([0xbb; 32]).unwrap();
+        let evt_sender = Address::from_bytes([0xcc; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: tx_sender.to_string(),
+            success: None,
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![TxDetailEvent {
+                package_id: pkg_addr.to_string(),
+                module: "m".into(),
+                sender: evt_sender.to_string(),
+                event_type: "E".into(),
+                json: None,
+            }],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], InspectTarget::Address(tx_sender));
+        assert_eq!(links[1], InspectTarget::Object(pkg_addr));
+        assert_eq!(links[2], InspectTarget::Address(evt_sender));
+    }
+
+    #[test]
+    fn tx_inspector_links_deduplicates_event_senders() {
+        let (mut app, _) = test_app();
+        let tx_sender = Address::from_bytes([0xaa; 32]).unwrap();
+        let pkg1 = Address::from_bytes([0xbb; 32]).unwrap();
+        let pkg2 = Address::from_bytes([0xcc; 32]).unwrap();
+        let evt_sender = Address::from_bytes([0xdd; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: tx_sender.to_string(),
+            success: None,
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![
+                TxDetailEvent {
+                    package_id: pkg1.to_string(),
+                    module: "m".into(),
+                    sender: evt_sender.to_string(),
+                    event_type: "E1".into(),
+                    json: None,
+                },
+                TxDetailEvent {
+                    package_id: pkg2.to_string(),
+                    module: "m".into(),
+                    sender: evt_sender.to_string(),
+                    event_type: "E2".into(),
+                    json: None,
+                },
+            ],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 4);
+        assert_eq!(links[0], InspectTarget::Address(tx_sender));
+        assert_eq!(links[1], InspectTarget::Object(pkg1));
+        assert_eq!(links[2], InspectTarget::Address(evt_sender));
+        assert_eq!(links[3], InspectTarget::Object(pkg2));
+    }
+
+    #[test]
+    fn tx_inspector_links_deduplicates_event_sender_matching_tx_sender() {
+        let (mut app, _) = test_app();
+        let sender = Address::from_bytes([0xaa; 32]).unwrap();
+        let pkg_addr = Address::from_bytes([0xbb; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: sender.to_string(),
+            success: None,
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![TxDetailEvent {
+                package_id: pkg_addr.to_string(),
+                module: "m".into(),
+                sender: sender.to_string(),
+                event_type: "E".into(),
+                json: None,
+            }],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], InspectTarget::Address(sender));
+        assert_eq!(links[1], InspectTarget::Object(pkg_addr));
     }
 
     #[test]

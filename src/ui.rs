@@ -328,6 +328,12 @@ fn append_tx_events_lines<'a>(
         .map(|o| o.object_id.as_str())
         .collect();
 
+    // Track seen senders for dedup (initialized with tx-level sender)
+    let mut seen_senders: Vec<&str> = Vec::new();
+    if detail.sender.parse::<Address>().is_ok() {
+        seen_senders.push(detail.sender.as_str());
+    }
+
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!(
@@ -368,6 +374,38 @@ fn append_tx_events_lines<'a>(
                 Span::raw("  "),
                 Span::styled(
                     format!("{}::{}", evt.package_id, evt.module),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        let sender_is_link =
+            evt.sender.parse::<Address>().is_ok() && !seen_senders.contains(&evt.sender.as_str());
+        if sender_is_link {
+            seen_senders.push(evt.sender.as_str());
+            let is_selected = *link_idx == selected;
+            if is_selected {
+                *selected_line = Some(lines.len() as u16);
+            }
+            let prefix = if is_selected { ">   " } else { "    " };
+            let value_style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Gray)),
+                Span::styled("Sender: ", Style::default().fg(Color::Gray)),
+                Span::styled(evt.sender.clone(), value_style),
+            ]));
+            *link_idx += 1;
+        } else if evt.sender.parse::<Address>().is_ok() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("Sender: {}", evt.sender),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
