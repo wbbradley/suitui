@@ -43,6 +43,12 @@ struct AddressCacheEntry {
     fetched_at: Instant,
 }
 
+struct TxDetailCacheEntry {
+    data: TransactionDetail,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
 use crate::{
     address_fetcher::{self, AddressData, AddressFetchResult},
     coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
@@ -56,7 +62,13 @@ use crate::{
         ObjectFetchResult,
         OwnerInfo,
     },
-    transaction_fetcher::{self, TransactionSummary, TxHistoryFetchResult},
+    transaction_fetcher::{
+        self,
+        TransactionDetail,
+        TransactionSummary,
+        TxDetailFetchResult,
+        TxHistoryFetchResult,
+    },
     transfer_executor::{self, TransferExecuteResult, TransferParams, TransferResult},
 };
 
@@ -136,13 +148,21 @@ pub enum AddressState {
     Error(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxDetailState {
+    Idle,
+    Loading,
+    Loaded(TransactionDetail),
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectTarget {
     Object(Address),
     Address(Address),
+    Transaction(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     Main,
     Inspector(InspectTarget),
@@ -221,6 +241,13 @@ pub struct App {
 
     transfer_exec_tx: mpsc::UnboundedSender<TransferExecuteResult>,
     pub transfer_exec_rx: mpsc::UnboundedReceiver<TransferExecuteResult>,
+
+    pub tx_detail_state: TxDetailState,
+    tx_detail_cache: HashMap<(String, String), TxDetailCacheEntry>,
+    tx_detail_inflight: Option<(String, String)>,
+    tx_detail_displayed_key: Option<(String, String)>,
+    tx_detail_tx: mpsc::UnboundedSender<TxDetailFetchResult>,
+    pub tx_detail_rx: mpsc::UnboundedReceiver<TxDetailFetchResult>,
 }
 
 impl App {
@@ -263,6 +290,7 @@ impl App {
         let (tx_history_tx, tx_history_rx) = mpsc::unbounded_channel();
         let (address_fetch_tx, address_fetch_rx) = mpsc::unbounded_channel();
         let (transfer_exec_tx, transfer_exec_rx) = mpsc::unbounded_channel();
+        let (tx_detail_tx, tx_detail_rx) = mpsc::unbounded_channel();
 
         App {
             view_stack: vec![View::Main],
@@ -320,11 +348,17 @@ impl App {
             transfer_error_flash: None,
             transfer_exec_tx,
             transfer_exec_rx,
+            tx_detail_state: TxDetailState::Idle,
+            tx_detail_cache: HashMap::new(),
+            tx_detail_inflight: None,
+            tx_detail_displayed_key: None,
+            tx_detail_tx,
+            tx_detail_rx,
         }
     }
 
     pub fn current_view(&self) -> View {
-        *self.view_stack.last().expect("view stack is empty")
+        self.view_stack.last().expect("view stack is empty").clone()
     }
 
     pub fn push_view(&mut self, view: View) {
@@ -361,6 +395,7 @@ impl App {
         match self.current_view() {
             View::Inspector(InspectTarget::Object(_)) => self.object_inspector_links(),
             View::Inspector(InspectTarget::Address(_)) => self.address_inspector_links(),
+            View::Inspector(InspectTarget::Transaction(_)) => vec![],
             _ => Vec::new(),
         }
     }
@@ -417,6 +452,7 @@ impl App {
             View::Main => self.handle_main_key(key),
             View::Inspector(InspectTarget::Object(_)) => self.handle_object_inspector_key(key),
             View::Inspector(InspectTarget::Address(_)) => self.handle_address_inspector_key(key),
+            View::Inspector(InspectTarget::Transaction(_)) => self.handle_tx_inspector_key(key),
             View::TransactionHistory(_) => self.handle_tx_history_key(key),
         }
     }
@@ -622,9 +658,9 @@ impl App {
 
     fn inspect_selected_link(&mut self) {
         let links = self.inspector_links();
-        if let Some(&target) = links.get(self.inspector_sel) {
+        if let Some(target) = links.get(self.inspector_sel) {
             self.inspector_sel = 0;
-            self.push_view(View::Inspector(target));
+            self.push_view(View::Inspector(target.clone()));
         }
     }
 
@@ -1232,6 +1268,77 @@ impl App {
         state.step = TransferStep::Complete;
         // Clear coin cache so balances refresh after transfer
         self.coin_displayed_key = None;
+    }
+
+    fn handle_tx_inspector_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pop_view();
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    pub fn maybe_trigger_tx_detail_fetch(&mut self) {
+        let View::Inspector(InspectTarget::Transaction(ref digest)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.tx_detail_state = TxDetailState::Idle;
+            self.tx_detail_displayed_key = None;
+            return;
+        };
+        let key = (digest.clone(), env.rpc.clone());
+        if self.tx_detail_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.tx_detail_cache.get(&key)
+            && entry.fetched_at.elapsed() < OBJECT_CACHE_TTL
+        {
+            self.tx_detail_state = if let Some(msg) = &entry.error {
+                TxDetailState::Error(msg.clone())
+            } else {
+                TxDetailState::Loaded(entry.data.clone())
+            };
+            self.tx_detail_displayed_key = Some(key);
+            return;
+        }
+        if self.tx_detail_inflight.as_ref() == Some(&key) {
+            self.tx_detail_state = TxDetailState::Loading;
+            self.tx_detail_displayed_key = Some(key);
+            return;
+        }
+        self.tx_detail_inflight = Some(key.clone());
+        self.tx_detail_displayed_key = Some(key.clone());
+        self.tx_detail_state = TxDetailState::Loading;
+        transaction_fetcher::spawn_tx_detail_fetch(key.0, key.1, self.tx_detail_tx.clone());
+    }
+
+    pub fn handle_tx_detail_result(&mut self, result: TxDetailFetchResult) {
+        let key = (result.digest, result.rpc_url);
+        if self.tx_detail_inflight.as_ref() == Some(&key) {
+            self.tx_detail_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(data) => TxDetailCacheEntry {
+                data: data.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => TxDetailCacheEntry {
+                data: TransactionDetail::empty(),
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.tx_detail_cache.insert(key.clone(), entry);
+        if self.tx_detail_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(data) => self.tx_detail_state = TxDetailState::Loaded(data),
+                Err(msg) => self.tx_detail_state = TxDetailState::Error(msg),
+            }
+        }
     }
 
     fn handle_tx_history_key(&mut self, key: KeyEvent) -> AppAction {
@@ -2630,5 +2737,79 @@ mod tests {
         app.handle_key(key(KeyCode::Char('s')));
         assert!(app.transfer_state.is_some());
         assert_eq!(app.transfer_state.as_ref().unwrap().sender, addrs[2]);
+    }
+
+    // --- Transaction detail tests ---
+
+    #[tokio::test]
+    async fn tx_detail_triggers_fetch() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Transaction("abc123".into())));
+        app.maybe_trigger_tx_detail_fetch();
+        assert!(matches!(app.tx_detail_state, TxDetailState::Loading));
+        assert!(app.tx_detail_inflight.is_some());
+    }
+
+    #[test]
+    fn tx_detail_handle_result_ok() {
+        let (mut app, _) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let digest = "abc123".to_string();
+        app.push_view(View::Inspector(InspectTarget::Transaction(digest.clone())));
+        app.tx_detail_inflight = Some((digest.clone(), rpc_url.clone()));
+        app.tx_detail_displayed_key = Some((digest.clone(), rpc_url.clone()));
+        app.tx_detail_state = TxDetailState::Loading;
+
+        app.handle_tx_detail_result(TxDetailFetchResult {
+            digest,
+            rpc_url,
+            outcome: Ok(TransactionDetail::empty()),
+        });
+        assert!(matches!(app.tx_detail_state, TxDetailState::Loaded(_)));
+    }
+
+    #[test]
+    fn tx_detail_handle_result_error() {
+        let (mut app, _) = test_app();
+        let rpc_url = "https://testnet.example.com".to_string();
+        let digest = "abc123".to_string();
+        app.tx_detail_displayed_key = Some((digest.clone(), rpc_url.clone()));
+        app.tx_detail_state = TxDetailState::Loading;
+
+        app.handle_tx_detail_result(TxDetailFetchResult {
+            digest,
+            rpc_url,
+            outcome: Err("not found".into()),
+        });
+        assert!(matches!(app.tx_detail_state, TxDetailState::Error(_)));
+    }
+
+    #[test]
+    fn tx_detail_cache_hit() {
+        let (mut app, _) = test_app();
+        let digest = "abc123".to_string();
+        let rpc_url = "https://testnet.example.com".to_string();
+        app.push_view(View::Inspector(InspectTarget::Transaction(digest.clone())));
+        app.tx_detail_cache.insert(
+            (digest, rpc_url),
+            TxDetailCacheEntry {
+                data: TransactionDetail::empty(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.maybe_trigger_tx_detail_fetch();
+        assert!(matches!(app.tx_detail_state, TxDetailState::Loaded(_)));
+        assert!(app.tx_detail_inflight.is_none());
+    }
+
+    #[test]
+    fn tx_detail_esc_pops_view() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Transaction("abc123".into())));
+        assert_eq!(app.view_stack.len(), 2);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view_stack.len(), 1);
+        assert_eq!(app.current_view(), View::Main);
     }
 }

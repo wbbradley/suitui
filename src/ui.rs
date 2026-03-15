@@ -18,6 +18,7 @@ use crate::{
         InspectTarget,
         ObjectState,
         TransferStep,
+        TxDetailState,
         TxHistoryState,
         View,
     },
@@ -34,8 +35,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Inspector(InspectTarget::Address(addr)) => {
             draw_address_inspector(frame, app, addr);
         }
+        View::Inspector(InspectTarget::Transaction(ref digest)) => {
+            draw_tx_inspector_placeholder(frame, app, digest.clone());
+        }
         View::TransactionHistory(addr) => draw_transaction_history(frame, app, addr),
     }
+}
+
+fn draw_tx_inspector_placeholder(frame: &mut Frame, app: &App, digest: String) {
+    let block = Block::default()
+        .title(format!("Transaction: {digest}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let msg = match &app.tx_detail_state {
+        TxDetailState::Loaded(_) => "Loaded (rendering coming soon)".to_string(),
+        TxDetailState::Loading => "Loading transaction...".to_string(),
+        TxDetailState::Error(e) => format!("Error: {e}"),
+        TxDetailState::Idle => "Waiting...".to_string(),
+    };
+    let paragraph = Paragraph::new(msg).block(block);
+    frame.render_widget(paragraph, frame.area());
 }
 
 fn draw_main(frame: &mut Frame, app: &mut App) {

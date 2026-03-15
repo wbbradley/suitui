@@ -100,6 +100,9 @@ fn run_event_loop(
         while let Ok(result) = app.address_fetch_rx.try_recv() {
             app.handle_address_fetch_result(result);
         }
+        while let Ok(result) = app.tx_detail_rx.try_recv() {
+            app.handle_tx_detail_result(result);
+        }
 
         app.maybe_trigger_coin_fetch();
         app.maybe_trigger_chain_id_fetch();
@@ -107,6 +110,7 @@ fn run_event_loop(
         app.maybe_trigger_dyn_fields_fetch();
         app.maybe_trigger_tx_history_fetch();
         app.maybe_trigger_address_fetch();
+        app.maybe_trigger_tx_detail_fetch();
 
         if app.should_quit {
             break;

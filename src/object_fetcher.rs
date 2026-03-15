@@ -187,7 +187,7 @@ fn convert_dyn_field(df: &DynamicField) -> DynFieldInfo {
     }
 }
 
-fn prost_value_to_json(value: &prost_types::Value) -> serde_json::Value {
+pub(crate) fn prost_value_to_json(value: &prost_types::Value) -> serde_json::Value {
     use prost_types::value::Kind;
     match &value.kind {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
