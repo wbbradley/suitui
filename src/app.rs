@@ -53,6 +53,26 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferStep {
+    SelectCoin,
+    EnterRecipient,
+    EnterAmount,
+    Review,
+}
+
+pub struct TransferState {
+    pub step: TransferStep,
+    pub balances: Vec<CoinBalance>,
+    pub coin_list_state: ListState,
+    pub recipient_input: String,
+    pub recipient_error: Option<String>,
+    pub recipient: Option<Address>,
+    pub amount_input: String,
+    pub amount_error: Option<String>,
+    pub amount_raw: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Accounts,
     Coins,
@@ -117,7 +137,6 @@ pub struct App {
     pub address_input_error: Option<String>,
     pub accounts: Vec<(Address, String)>,
     pub envs: Vec<Env>,
-    #[allow(dead_code)]
     pub keystore: Vec<KeyEntry>,
 
     pub active_address: Option<Address>,
@@ -164,6 +183,9 @@ pub struct App {
     tx_history_displayed_key: Option<(Address, String)>,
     tx_history_tx: mpsc::UnboundedSender<TxHistoryFetchResult>,
     pub tx_history_rx: mpsc::UnboundedReceiver<TxHistoryFetchResult>,
+
+    pub transfer_state: Option<TransferState>,
+    pub transfer_error_flash: Option<String>,
 }
 
 impl App {
@@ -251,6 +273,8 @@ impl App {
             tx_history_displayed_key: None,
             tx_history_tx,
             tx_history_rx,
+            transfer_state: None,
+            transfer_error_flash: None,
         }
     }
 
@@ -272,7 +296,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]
     pub fn key_for_address(&self, addr: &Address) -> Option<&KeyEntry> {
         self.keystore.iter().find(|k| k.address == *addr)
     }
@@ -327,6 +350,11 @@ impl App {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) -> AppAction {
+        self.transfer_error_flash = None;
+
+        if self.transfer_state.is_some() {
+            return self.handle_transfer_key(key);
+        }
         if self.address_input_open {
             return self.handle_address_input_key(key);
         }
@@ -387,6 +415,12 @@ impl App {
                 if let Some(addr) = self.active_address {
                     self.tx_history_table_state.select(Some(0));
                     self.push_view(View::TransactionHistory(addr));
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char('s') => {
+                if let Err(msg) = self.open_transfer() {
+                    self.transfer_error_flash = Some(msg.to_string());
                 }
                 AppAction::Redraw
             }
@@ -764,6 +798,193 @@ impl App {
                 Ok(fields) => self.dyn_fields_state = DynFieldsState::Loaded(fields),
                 Err(msg) => self.dyn_fields_state = DynFieldsState::Error(msg),
             }
+        }
+    }
+
+    fn open_transfer(&mut self) -> Result<(), &'static str> {
+        let addr = self.active_address.ok_or("no active address")?;
+        self.key_for_address(&addr)
+            .ok_or("no signing key for this address")?;
+        let balances = match &self.coin_state {
+            CoinState::Loaded(b) if !b.is_empty() => b.clone(),
+            _ => return Err("no coins loaded for this address"),
+        };
+        let mut coin_list_state = ListState::default();
+        coin_list_state.select(Some(0));
+        self.transfer_state = Some(TransferState {
+            step: TransferStep::SelectCoin,
+            balances,
+            coin_list_state,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: None,
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+        });
+        Ok(())
+    }
+
+    fn handle_transfer_key(&mut self, key: KeyEvent) -> AppAction {
+        let Some(state) = &self.transfer_state else {
+            return AppAction::None;
+        };
+        match state.step {
+            TransferStep::SelectCoin => self.handle_transfer_select_coin(key),
+            TransferStep::EnterRecipient => self.handle_transfer_recipient(key),
+            TransferStep::EnterAmount => self.handle_transfer_amount(key),
+            TransferStep::Review => self.handle_transfer_review(key),
+        }
+    }
+
+    fn handle_transfer_select_coin(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.transfer_state = None;
+                AppAction::Redraw
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(state) = &mut self.transfer_state {
+                    let count = state.balances.len();
+                    if count > 0 {
+                        let current = state.coin_list_state.selected().unwrap_or(0) as i32;
+                        let next = (current - 1).rem_euclid(count as i32) as usize;
+                        state.coin_list_state.select(Some(next));
+                    }
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(state) = &mut self.transfer_state {
+                    let count = state.balances.len();
+                    if count > 0 {
+                        let current = state.coin_list_state.selected().unwrap_or(0) as i32;
+                        let next = (current + 1).rem_euclid(count as i32) as usize;
+                        state.coin_list_state.select(Some(next));
+                    }
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                if let Some(state) = &mut self.transfer_state
+                    && state.coin_list_state.selected().is_some() {
+                        state.step = TransferStep::EnterRecipient;
+                    }
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_transfer_recipient(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.step = TransferStep::SelectCoin;
+                    state.recipient_error = None;
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                if let Some(state) = &mut self.transfer_state {
+                    match state.recipient_input.parse::<Address>() {
+                        Ok(addr) => {
+                            state.recipient = Some(addr);
+                            state.recipient_error = None;
+                            state.step = TransferStep::EnterAmount;
+                        }
+                        Err(e) => {
+                            state.recipient_error = Some(e.to_string());
+                        }
+                    }
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.recipient_input.pop();
+                    state.recipient_error = None;
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.recipient_input.push(c);
+                    state.recipient_error = None;
+                }
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_transfer_amount(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.step = TransferStep::EnterRecipient;
+                    state.amount_error = None;
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                if let Some(state) = &mut self.transfer_state {
+                    match coin_fetcher::parse_amount(&state.amount_input, 9) {
+                        Ok(raw) => {
+                            let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+                            let available = state
+                                .balances
+                                .get(selected_idx)
+                                .map(|b| b.total_balance)
+                                .unwrap_or(0);
+                            if raw > available {
+                                state.amount_error =
+                                    Some("amount exceeds available balance".into());
+                            } else {
+                                state.amount_raw = Some(raw);
+                                state.amount_error = None;
+                                state.step = TransferStep::Review;
+                            }
+                        }
+                        Err(e) => {
+                            state.amount_error = Some(e);
+                        }
+                    }
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.amount_input.pop();
+                    state.amount_error = None;
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.amount_input.push(c);
+                    state.amount_error = None;
+                }
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_transfer_review(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(state) = &mut self.transfer_state {
+                    state.step = TransferStep::EnterAmount;
+                }
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                // Placeholder for sub-task 3: execute transaction
+                self.transfer_state = None;
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
         }
     }
 
@@ -1663,5 +1884,238 @@ mod tests {
         assert_eq!(app.view_stack.len(), 3);
         assert_eq!(app.current_view(), View::ObjectInspector(owner_addr));
         assert_eq!(app.inspector_sel, 0);
+    }
+
+    // --- Transfer tests ---
+
+    fn app_with_coins_and_key() -> (App, [Address; 3]) {
+        let (mut app, addrs) = test_app();
+        app.keystore = vec![KeyEntry::test_entry(addrs[1])];
+        app.coin_state = CoinState::Loaded(vec![
+            CoinBalance {
+                coin_type: "0x2::sui::SUI".into(),
+                total_balance: 5_000_000_000,
+            },
+            CoinBalance {
+                coin_type: "0xabc::mod::USDC".into(),
+                total_balance: 100_000_000,
+            },
+        ]);
+        (app, addrs)
+    }
+
+    #[test]
+    fn s_opens_transfer_modal() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_some());
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::SelectCoin);
+        assert_eq!(state.balances.len(), 2);
+    }
+
+    #[test]
+    fn s_guard_no_coins() {
+        let (mut app, _) = test_app();
+        app.keystore = vec![KeyEntry::test_entry(
+            Address::from_bytes([2u8; 32]).unwrap(),
+        )];
+        // coin_state is Idle by default
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_none());
+        assert!(app.transfer_error_flash.is_some());
+    }
+
+    #[test]
+    fn s_guard_no_key() {
+        let (mut app, _) = test_app();
+        app.coin_state = CoinState::Loaded(vec![CoinBalance {
+            coin_type: "0x2::sui::SUI".into(),
+            total_balance: 1_000_000_000,
+        }]);
+        // keystore is empty by default
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_none());
+        assert!(app.transfer_error_flash.is_some());
+    }
+
+    #[test]
+    fn transfer_select_coin_esc_closes() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_some());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.transfer_state.is_none());
+    }
+
+    #[test]
+    fn transfer_select_coin_navigate() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .coin_list_state
+                .selected(),
+            Some(0)
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .coin_list_state
+                .selected(),
+            Some(1)
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.transfer_state
+                .as_ref()
+                .unwrap()
+                .coin_list_state
+                .selected(),
+            Some(0)
+        ); // wraps
+    }
+
+    #[test]
+    fn transfer_select_coin_enter_advances() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.transfer_state.as_ref().unwrap().step,
+            TransferStep::EnterRecipient
+        );
+    }
+
+    #[test]
+    fn transfer_recipient_typing() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        app.handle_key(key(KeyCode::Char('0')));
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.transfer_state.as_ref().unwrap().recipient_input, "0xa");
+    }
+
+    #[test]
+    fn transfer_recipient_valid_advances() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert!(state.recipient.is_some());
+    }
+
+    #[test]
+    fn transfer_recipient_invalid_shows_error() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        for c in "not_hex".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterRecipient);
+        assert!(state.recipient_error.is_some());
+    }
+
+    #[test]
+    fn transfer_amount_valid_advances() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // recipient
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Enter)); // amount = 1 SUI
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::Review);
+        assert_eq!(state.amount_raw, Some(1_000_000_000));
+    }
+
+    #[test]
+    fn transfer_amount_exceeds_balance() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // recipient
+        for c in "999".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert!(state.amount_error.is_some());
+    }
+
+    #[test]
+    fn transfer_review_esc_goes_back() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // recipient
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Enter)); // amount → review
+        assert_eq!(
+            app.transfer_state.as_ref().unwrap().step,
+            TransferStep::Review
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.transfer_state.as_ref().unwrap().step,
+            TransferStep::EnterAmount
+        );
+    }
+
+    #[test]
+    fn transfer_review_enter_closes() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // recipient
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Enter)); // amount → review
+        app.handle_key(key(KeyCode::Enter)); // confirm
+        assert!(app.transfer_state.is_none());
+    }
+
+    #[test]
+    fn transfer_back_preserves_data() {
+        let (mut app, _) = app_with_coins_and_key();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter)); // select coin
+        for c in "0x2".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // recipient → amount
+        app.handle_key(key(KeyCode::Char('1')));
+        // Go back to recipient
+        app.handle_key(key(KeyCode::Esc));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterRecipient);
+        assert_eq!(state.recipient_input, "0x2");
+        assert_eq!(state.amount_input, "1");
     }
 }

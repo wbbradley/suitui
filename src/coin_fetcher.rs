@@ -33,6 +33,44 @@ pub fn format_balance(raw: u64, decimals: u32) -> String {
     format!("{whole}.{trimmed}")
 }
 
+pub fn parse_amount(input: &str, decimals: u32) -> Result<u64, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("amount is empty".into());
+    }
+    let parts: Vec<&str> = input.split('.').collect();
+    if parts.len() > 2 {
+        return Err("invalid number format".into());
+    }
+    let whole: u64 = if parts[0].is_empty() {
+        0
+    } else {
+        parts[0].parse().map_err(|_| "invalid number".to_string())?
+    };
+    let frac_raw: u64 = if parts.len() == 2 {
+        let frac_str = parts[1];
+        if frac_str.len() > decimals as usize {
+            return Err(format!("too many decimal places (max {decimals})"));
+        }
+        let padded = format!("{:0<width$}", frac_str, width = decimals as usize);
+        padded
+            .parse()
+            .map_err(|_| "invalid fractional part".to_string())?
+    } else {
+        0
+    };
+    let divisor = 10u64.pow(decimals);
+    let total = whole
+        .checked_mul(divisor)
+        .ok_or("amount too large")?
+        .checked_add(frac_raw)
+        .ok_or("amount too large")?;
+    if total == 0 {
+        return Err("amount must be greater than zero".into());
+    }
+    Ok(total)
+}
+
 pub fn short_coin_type(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
 }
@@ -150,5 +188,46 @@ mod tests {
     #[test]
     fn short_coin_type_bare() {
         assert_eq!(short_coin_type("bare"), "bare");
+    }
+
+    #[test]
+    fn parse_amount_whole() {
+        assert_eq!(parse_amount("1", 9).unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn parse_amount_fractional() {
+        assert_eq!(parse_amount("1.5", 9).unwrap(), 1_500_000_000);
+    }
+
+    #[test]
+    fn parse_amount_small() {
+        assert_eq!(parse_amount("0.0005", 9).unwrap(), 500_000);
+    }
+
+    #[test]
+    fn parse_amount_empty_err() {
+        assert!(parse_amount("", 9).is_err());
+    }
+
+    #[test]
+    fn parse_amount_zero_err() {
+        assert!(parse_amount("0", 9).is_err());
+    }
+
+    #[test]
+    fn parse_amount_too_many_decimals() {
+        assert!(parse_amount("1.1234567890", 9).is_err());
+    }
+
+    #[test]
+    fn parse_amount_not_a_number() {
+        assert!(parse_amount("abc", 9).is_err());
+    }
+
+    #[test]
+    fn parse_amount_round_trip() {
+        let raw = parse_amount("1.5", 9).unwrap();
+        assert_eq!(format_balance(raw, 9), "1.5");
     }
 }

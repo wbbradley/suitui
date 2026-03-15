@@ -87,6 +87,17 @@ fn derive_address(scheme: u8, private_key_bytes: &[u8; 32]) -> Result<Address, S
 }
 
 #[cfg(test)]
+impl KeyEntry {
+    pub fn test_entry(address: Address) -> Self {
+        Self {
+            address,
+            scheme: 0x00,
+            private_key_bytes: [0u8; 32],
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

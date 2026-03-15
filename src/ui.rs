@@ -8,7 +8,7 @@ use ratatui::{
 use sui_sdk_types::Address;
 
 use crate::{
-    app::{App, CoinState, DynFieldsState, Focus, ObjectState, TxHistoryState, View},
+    app::{App, CoinState, DynFieldsState, Focus, ObjectState, TransferStep, TxHistoryState, View},
     coin_fetcher::{format_balance, short_coin_type},
     object_fetcher::{DynFieldKind, ObjectData, OwnerInfo},
     transaction_fetcher::{self, TransactionSummary, TxBalanceChange},
@@ -44,6 +44,9 @@ fn draw_main(frame: &mut Frame, app: &mut App) {
     }
     if app.address_input_open {
         draw_address_input(frame, app, frame.area());
+    }
+    if app.transfer_state.is_some() {
+        draw_transfer_modal(frame, app, frame.area());
     }
 }
 
@@ -231,26 +234,59 @@ fn draw_network_info(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_help_bar(frame: &mut Frame, _app: &mut App, area: Rect) {
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::raw(": Select  "),
-        Span::styled("q", Style::default().fg(Color::Cyan)),
-        Span::raw(": Quit  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::raw(": Navigate  "),
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(": Switch pane  "),
-        Span::styled("e", Style::default().fg(Color::Cyan)),
-        Span::raw(": Env  "),
-        Span::styled("i", Style::default().fg(Color::Cyan)),
-        Span::raw(": Inspect  "),
-        Span::styled("t", Style::default().fg(Color::Cyan)),
-        Span::raw(": Tx History  "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(": Refresh"),
-    ]));
-    frame.render_widget(help, area);
+fn draw_help_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(flash) = &app.transfer_error_flash {
+        let cols = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(flash.len() as u16 + 2),
+        ])
+        .split(area);
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(": Select  "),
+            Span::styled("q", Style::default().fg(Color::Cyan)),
+            Span::raw(": Quit  "),
+            Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+            Span::raw(": Navigate  "),
+            Span::styled("Tab", Style::default().fg(Color::Cyan)),
+            Span::raw(": Switch pane  "),
+            Span::styled("e", Style::default().fg(Color::Cyan)),
+            Span::raw(": Env  "),
+            Span::styled("s", Style::default().fg(Color::Cyan)),
+            Span::raw(": Send  "),
+            Span::styled("i", Style::default().fg(Color::Cyan)),
+            Span::raw(": Inspect  "),
+            Span::styled("t", Style::default().fg(Color::Cyan)),
+            Span::raw(": Tx History  "),
+            Span::styled("r", Style::default().fg(Color::Cyan)),
+            Span::raw(": Refresh"),
+        ]));
+        frame.render_widget(help, cols[0]);
+        let err = Paragraph::new(flash.as_str()).style(Style::default().fg(Color::Red));
+        frame.render_widget(err, cols[1]);
+    } else {
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(": Select  "),
+            Span::styled("q", Style::default().fg(Color::Cyan)),
+            Span::raw(": Quit  "),
+            Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+            Span::raw(": Navigate  "),
+            Span::styled("Tab", Style::default().fg(Color::Cyan)),
+            Span::raw(": Switch pane  "),
+            Span::styled("e", Style::default().fg(Color::Cyan)),
+            Span::raw(": Env  "),
+            Span::styled("s", Style::default().fg(Color::Cyan)),
+            Span::raw(": Send  "),
+            Span::styled("i", Style::default().fg(Color::Cyan)),
+            Span::raw(": Inspect  "),
+            Span::styled("t", Style::default().fg(Color::Cyan)),
+            Span::raw(": Tx History  "),
+            Span::styled("r", Style::default().fg(Color::Cyan)),
+            Span::raw(": Refresh"),
+        ]));
+        frame.render_widget(help, area);
+    }
 }
 
 fn draw_env_dropdown(frame: &mut Frame, app: &mut App, anchor: Rect) {
@@ -322,6 +358,237 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
 
     let help =
         Paragraph::new("Enter: Inspect  Esc: Cancel").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_transfer_modal(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
+    match state.step {
+        TransferStep::SelectCoin => draw_transfer_select_coin(frame, app, area),
+        TransferStep::EnterRecipient => draw_transfer_recipient(frame, app, area),
+        TransferStep::EnterAmount => draw_transfer_amount(frame, app, area),
+        TransferStep::Review => draw_transfer_review(frame, app, area),
+    }
+}
+
+fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(state) = &mut app.transfer_state else {
+        return;
+    };
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = (state.balances.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Send — Select Coin (1/4)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let items: Vec<ListItem> = state
+        .balances
+        .iter()
+        .map(|b| {
+            let label = format!(
+                "{} — {}",
+                short_coin_type(&b.coin_type),
+                format_balance(b.total_balance, 9)
+            );
+            ListItem::new(label)
+        })
+        .collect();
+
+    let list_height = inner.height.saturating_sub(1);
+    let list_area = Rect::new(inner.x, inner.y, inner.width, list_height);
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(list, list_area, &mut state.coin_list_state);
+
+    let help =
+        Paragraph::new("Enter: Select  Esc: Cancel").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_transfer_recipient(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 6u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Send — Recipient (2/4)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let input_line = format!("{}█", &state.recipient_input);
+    let input = Paragraph::new(input_line);
+    let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(input, input_area);
+
+    if let Some(err) = &state.recipient_error {
+        let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
+        let err_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        frame.render_widget(err_line, err_area);
+    }
+
+    let help = Paragraph::new("Enter: Next  Esc: Back").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 8u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Send — Amount (3/4)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+    let (coin_label, available) = state
+        .balances
+        .get(selected_idx)
+        .map(|b| {
+            (
+                short_coin_type(&b.coin_type).to_string(),
+                format_balance(b.total_balance, 9),
+            )
+        })
+        .unwrap_or(("?".into(), "?".into()));
+
+    let context_line = format!("{coin_label} — Available: {available}");
+    let context = Paragraph::new(context_line).style(Style::default().fg(Color::Gray));
+    let context_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(context, context_area);
+
+    let input_line = format!("{}█", &state.amount_input);
+    let input = Paragraph::new(input_line);
+    let input_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    frame.render_widget(input, input_area);
+
+    if let Some(err) = &state.amount_error {
+        let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
+        let err_area = Rect::new(inner.x, inner.y + 3, inner.width, 1);
+        frame.render_widget(err_line, err_area);
+    }
+
+    let help = Paragraph::new("Enter: Next  Esc: Back").style(Style::default().fg(Color::DarkGray));
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    frame.render_widget(help, help_area);
+}
+
+fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 9u16;
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title("Send — Review (4/4)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let label_style = Style::default().fg(Color::Gray);
+
+    let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+    let coin_label = state
+        .balances
+        .get(selected_idx)
+        .map(|b| short_coin_type(&b.coin_type).to_string())
+        .unwrap_or("?".into());
+    let recipient = state.recipient.map(|a| a.to_string()).unwrap_or("?".into());
+    let amount = state
+        .amount_raw
+        .map(|r| format_balance(r, 9))
+        .unwrap_or("?".into());
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Coin:   ", label_style),
+            Span::raw(coin_label),
+        ]),
+        Line::from(vec![
+            Span::styled("To:     ", label_style),
+            Span::raw(recipient),
+        ]),
+        Line::from(vec![
+            Span::styled("Amount: ", label_style),
+            Span::raw(amount),
+        ]),
+    ];
+
+    let summary = Paragraph::new(lines);
+    let summary_area = Rect::new(inner.x, inner.y, inner.width, 3);
+    frame.render_widget(summary, summary_area);
+
+    let help = Paragraph::new("Enter: Send  Esc: Back").style(Style::default().fg(Color::DarkGray));
     let help_area = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1),
