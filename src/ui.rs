@@ -17,6 +17,7 @@ use crate::{
         Focus,
         InspectTarget,
         ObjectState,
+        TransferState,
         TransferStep,
         TxDetailState,
         TxHistoryState,
@@ -774,6 +775,38 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(help, help_area);
 }
 
+const TRANSFER_HEADER_LINES: u16 = 3; // 2 content lines + 1 blank separator
+
+fn transfer_header_lines(state: &TransferState) -> Vec<Line<'static>> {
+    let from_line = Line::from(vec![
+        Span::styled("From:    ", Style::default().fg(Color::Gray)),
+        Span::raw(format!(
+            "{} ({})",
+            state.sender_alias,
+            short_address(&state.sender)
+        )),
+    ]);
+    let network_style = if state.is_mainnet {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let network_line = Line::from(vec![
+        Span::styled("Network: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{} ({})", state.env_name, state.chain_id),
+            network_style,
+        ),
+    ]);
+    vec![from_line, network_line]
+}
+
+fn render_transfer_header(frame: &mut Frame, state: &TransferState, area: Rect) {
+    let header = Paragraph::new(transfer_header_lines(state));
+    let header_area = Rect::new(area.x, area.y, area.width, 2);
+    frame.render_widget(header, header_area);
+}
+
 fn draw_transfer_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(state) = &app.transfer_state else {
         return;
@@ -783,7 +816,7 @@ fn draw_transfer_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         TransferStep::EnterRecipient => draw_transfer_recipient(frame, app, area),
         TransferStep::EnterAmount => draw_transfer_amount(frame, app, area),
         TransferStep::Review => draw_transfer_review(frame, app, area),
-        TransferStep::Executing => draw_transfer_executing(frame, area),
+        TransferStep::Executing => draw_transfer_executing(frame, app, area),
         TransferStep::Complete => draw_transfer_complete(frame, app, area),
     }
 }
@@ -793,7 +826,8 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let width = 50u16.min(area.width.saturating_sub(4));
-    let height = (state.balances.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let height = (state.balances.len() as u16 + 4 + TRANSFER_HEADER_LINES)
+        .min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -801,12 +835,14 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
-        .title("Send — Select Coin (1/4)")
+        .title("Send — Select Coin Type (1/4)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
+
+    render_transfer_header(frame, state, inner);
 
     let items: Vec<ListItem> = state
         .balances
@@ -821,8 +857,12 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let list_height = inner.height.saturating_sub(1);
-    let list_area = Rect::new(inner.x, inner.y, inner.width, list_height);
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
+    let list_height = inner
+        .height
+        .saturating_sub(TRANSFER_HEADER_LINES)
+        .saturating_sub(1);
+    let list_area = Rect::new(inner.x, content_top, inner.width, list_height);
 
     let list = List::new(items)
         .highlight_style(
@@ -850,7 +890,7 @@ fn draw_transfer_recipient(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 6u16;
+    let height = 6u16 + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -865,14 +905,18 @@ fn draw_transfer_recipient(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
+    render_transfer_header(frame, state, inner);
+
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
+
     let input_line = format!("{}█", &state.recipient_input);
     let input = Paragraph::new(input_line);
-    let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let input_area = Rect::new(inner.x, content_top, inner.width, 1);
     frame.render_widget(input, input_area);
 
     if let Some(err) = &state.recipient_error {
         let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
-        let err_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        let err_area = Rect::new(inner.x, content_top + 1, inner.width, 1);
         frame.render_widget(err_line, err_area);
     }
 
@@ -891,7 +935,7 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 8u16;
+    let height = 8u16 + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -905,6 +949,10 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
+
+    render_transfer_header(frame, state, inner);
+
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
 
     let selected_idx = state.coin_list_state.selected().unwrap_or(0);
     let (coin_label, available) = state
@@ -920,17 +968,17 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let context_line = format!("{coin_label} — Available: {available}");
     let context = Paragraph::new(context_line).style(Style::default().fg(Color::Gray));
-    let context_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let context_area = Rect::new(inner.x, content_top, inner.width, 1);
     frame.render_widget(context, context_area);
 
     let input_line = format!("{}█", &state.amount_input);
     let input = Paragraph::new(input_line);
-    let input_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    let input_area = Rect::new(inner.x, content_top + 2, inner.width, 1);
     frame.render_widget(input, input_area);
 
     if let Some(err) = &state.amount_error {
         let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
-        let err_area = Rect::new(inner.x, inner.y + 3, inner.width, 1);
+        let err_area = Rect::new(inner.x, content_top + 3, inner.width, 1);
         frame.render_widget(err_line, err_area);
     }
 
@@ -949,7 +997,7 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 9u16;
+    let height = 9u16 + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -964,6 +1012,9 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
+    render_transfer_header(frame, state, inner);
+
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
     let label_style = Style::default().fg(Color::Gray);
 
     let selected_idx = state.coin_list_state.selected().unwrap_or(0);
@@ -999,7 +1050,7 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
 
     let summary = Paragraph::new(lines);
-    let summary_area = Rect::new(inner.x, inner.y, inner.width, 3);
+    let summary_area = Rect::new(inner.x, content_top, inner.width, 3);
     frame.render_widget(summary, summary_area);
 
     let help = Paragraph::new("Enter: Send  Esc: Back").style(Style::default().fg(Color::DarkGray));
@@ -1012,9 +1063,12 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(help, help_area);
 }
 
-fn draw_transfer_executing(frame: &mut Frame, area: Rect) {
+fn draw_transfer_executing(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(state) = &app.transfer_state else {
+        return;
+    };
     let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 5u16;
+    let height = 5u16 + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -1029,8 +1083,13 @@ fn draw_transfer_executing(frame: &mut Frame, area: Rect) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
+    render_transfer_header(frame, state, inner);
+
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
+    let content_height = inner.height.saturating_sub(TRANSFER_HEADER_LINES);
+
     let msg = Paragraph::new("Submitting transaction...").style(Style::default().fg(Color::Yellow));
-    let msg_area = Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1);
+    let msg_area = Rect::new(inner.x, content_top + content_height / 2, inner.width, 1);
     frame.render_widget(msg, msg_area);
 }
 
@@ -1039,7 +1098,7 @@ fn draw_transfer_complete(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 7u16;
+    let height = 7u16 + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -1083,12 +1142,19 @@ fn draw_transfer_complete(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
+    render_transfer_header(frame, state, inner);
+
+    let content_top = inner.y + TRANSFER_HEADER_LINES;
+
     let body = Paragraph::new(lines);
     let body_area = Rect::new(
         inner.x,
-        inner.y,
+        content_top,
         inner.width,
-        inner.height.saturating_sub(1),
+        inner
+            .height
+            .saturating_sub(TRANSFER_HEADER_LINES)
+            .saturating_sub(1),
     );
     frame.render_widget(body, body_area);
 

@@ -9,6 +9,7 @@ use ratatui::widgets::{ListState, TableState};
 use sui_sdk_types::Address;
 use tokio::sync::mpsc;
 
+const SUI_MAINNET_CHAIN_ID_PREFIX: &str = "35834a8a";
 const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
 const OBJECT_CACHE_TTL: Duration = Duration::from_secs(300);
 const TX_HISTORY_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -86,6 +87,10 @@ pub enum TransferStep {
 pub struct TransferState {
     pub step: TransferStep,
     pub sender: Address,
+    pub sender_alias: String,
+    pub env_name: String,
+    pub chain_id: String,
+    pub is_mainnet: bool,
     pub balances: Vec<CoinBalance>,
     pub coin_list_state: ListState,
     pub recipient_input: String,
@@ -393,6 +398,17 @@ impl App {
     pub fn active_env_info(&self) -> Option<&Env> {
         let env_name = self.active_env.as_ref()?;
         self.envs.iter().find(|e| e.alias == *env_name)
+    }
+
+    fn resolve_chain_id(&self) -> String {
+        self.active_env_info()
+            .and_then(|env| {
+                env.chain_id
+                    .as_deref()
+                    .or_else(|| self.chain_id_cache.get(&env.rpc).map(|s| s.as_str()))
+            })
+            .unwrap_or("unknown")
+            .to_string()
     }
 
     pub fn inspector_links(&self) -> Vec<InspectTarget> {
@@ -1098,20 +1114,35 @@ impl App {
     }
 
     fn open_transfer(&mut self) -> Result<(), &'static str> {
-        let addr = self
-            .selected_account_address()
-            .ok_or("no selected address")?;
+        let addr = self.active_address.ok_or("no active address")?;
         self.key_for_address(&addr)
             .ok_or("no signing key for this address")?;
         let balances = match &self.coin_state {
             CoinState::Loaded(b) if !b.is_empty() => b.clone(),
             _ => return Err("no coins loaded for this address"),
         };
+        let sender_alias = self
+            .accounts
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .map(|(_, alias)| alias.clone())
+            .unwrap_or_else(|| "unknown".into());
+        let chain_id = self.resolve_chain_id();
+        let is_mainnet = chain_id.starts_with(SUI_MAINNET_CHAIN_ID_PREFIX);
+        let env_name = if is_mainnet {
+            "mainnet".into()
+        } else {
+            self.active_env.clone().unwrap_or_else(|| "unknown".into())
+        };
         let mut coin_list_state = ListState::default();
         coin_list_state.select(Some(0));
         self.transfer_state = Some(TransferState {
             step: TransferStep::SelectCoin,
             sender: addr,
+            sender_alias,
+            env_name,
+            chain_id,
+            is_mainnet,
             balances,
             coin_list_state,
             recipient_input: String::new(),
@@ -1150,7 +1181,7 @@ impl App {
                     let count = state.balances.len();
                     if count > 0 {
                         let current = state.coin_list_state.selected().unwrap_or(0) as i32;
-                        let next = (current - 1).rem_euclid(count as i32) as usize;
+                        let next = (current - 1).clamp(0, count as i32 - 1) as usize;
                         state.coin_list_state.select(Some(next));
                     }
                 }
@@ -1161,7 +1192,7 @@ impl App {
                     let count = state.balances.len();
                     if count > 0 {
                         let current = state.coin_list_state.selected().unwrap_or(0) as i32;
-                        let next = (current + 1).rem_euclid(count as i32) as usize;
+                        let next = (current + 1).clamp(0, count as i32 - 1) as usize;
                         state.coin_list_state.select(Some(next));
                     }
                 }
@@ -2511,12 +2542,17 @@ mod tests {
 
     #[test]
     fn s_opens_transfer_modal() {
-        let (mut app, _) = app_with_coins_and_key();
+        let (mut app, addrs) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         assert!(app.transfer_state.is_some());
         let state = app.transfer_state.as_ref().unwrap();
         assert_eq!(state.step, TransferStep::SelectCoin);
         assert_eq!(state.balances.len(), 2);
+        assert_eq!(state.sender, addrs[1]);
+        assert_eq!(state.sender_alias, "bob");
+        assert_eq!(state.env_name, "testnet");
+        assert_eq!(state.chain_id, "bbb");
+        assert!(!state.is_mainnet);
     }
 
     #[test]
@@ -2582,8 +2618,8 @@ mod tests {
                 .unwrap()
                 .coin_list_state
                 .selected(),
-            Some(0)
-        ); // wraps
+            Some(1)
+        ); // clamps at end
     }
 
     #[test]
@@ -2748,6 +2784,10 @@ mod tests {
         app.transfer_state = Some(TransferState {
             step: TransferStep::Complete,
             sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2770,6 +2810,10 @@ mod tests {
         app.transfer_state = Some(TransferState {
             step: TransferStep::Complete,
             sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2790,6 +2834,10 @@ mod tests {
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
             sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2818,6 +2866,10 @@ mod tests {
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
             sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2844,6 +2896,10 @@ mod tests {
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
             sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
             balances: vec![],
             coin_list_state: ListState::default(),
             recipient_input: String::new(),
@@ -2860,6 +2916,44 @@ mod tests {
             },
         });
         assert!(app.coin_displayed_key.is_none());
+    }
+
+    #[test]
+    fn resolve_chain_id_prefers_env_config() {
+        let (app, _) = test_app();
+        // active_env is "testnet" which has chain_id Some("bbb")
+        assert_eq!(app.resolve_chain_id(), "bbb");
+    }
+
+    #[test]
+    fn resolve_chain_id_falls_back_to_cache() {
+        let (mut app, _) = test_app();
+        // Switch to mainnet env which has chain_id: None
+        app.active_env = Some("mainnet".into());
+        app.chain_id_cache
+            .insert("https://mainnet.example.com".into(), "cached_id".into());
+        assert_eq!(app.resolve_chain_id(), "cached_id");
+    }
+
+    #[test]
+    fn resolve_chain_id_unknown_when_missing() {
+        let (mut app, _) = test_app();
+        app.active_env = Some("mainnet".into());
+        // No cache entry either
+        assert_eq!(app.resolve_chain_id(), "unknown");
+    }
+
+    #[test]
+    fn transfer_mainnet_detection() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        // Set env chain_id to a mainnet prefix
+        app.envs[1].chain_id = Some("35834a8a1234".into());
+        app.handle_key(key(KeyCode::Char('s')));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.is_mainnet);
+        assert_eq!(state.env_name, "mainnet");
+        assert_eq!(state.chain_id, "35834a8a1234");
+        assert_eq!(state.sender, addrs[1]);
     }
 
     #[test]
@@ -2894,10 +2988,10 @@ mod tests {
     }
 
     #[test]
-    fn s_uses_selected_address() {
+    fn s_uses_active_address() {
         let (mut app, addrs) = test_app();
-        // Give carol (addrs[2]) a key and coins
-        app.keystore = vec![KeyEntry::test_entry(addrs[2])];
+        // Give bob (addrs[1], active_address) a key and coins
+        app.keystore = vec![KeyEntry::test_entry(addrs[1])];
         app.coin_state = CoinState::Loaded(vec![CoinBalance {
             coin_type: "0x2::sui::SUI".into(),
             total_balance: 1_000_000_000,
@@ -2908,10 +3002,10 @@ mod tests {
         assert_eq!(app.selected_account_address(), Some(addrs[2]));
         // active_address is still bob
         assert_eq!(app.active_address, Some(addrs[1]));
-        // Press 's' — should capture carol as sender
+        // Press 's' — should capture bob (active_address) as sender, not carol
         app.handle_key(key(KeyCode::Char('s')));
         assert!(app.transfer_state.is_some());
-        assert_eq!(app.transfer_state.as_ref().unwrap().sender, addrs[2]);
+        assert_eq!(app.transfer_state.as_ref().unwrap().sender, addrs[1]);
     }
 
     // --- Transaction detail tests ---
