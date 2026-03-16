@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-03-16
+
+### Added
+- Decimal balance display for coin objects in the object inspector
+- Depth indicator (>) prefix on stacked inspector titles to show navigation depth
+
 ## [0.5.0] - 2026-03-15
 
 ### Added
