@@ -1528,10 +1528,31 @@ fn append_metadata_lines<'a>(
         ]));
     }
 
-    lines.push(Line::from(vec![
-        Span::styled("  Prev Tx:  ", label),
-        Span::raw(data.previous_transaction.clone()),
-    ]));
+    let prev_tx_linkable = !data.previous_transaction.is_empty();
+    if prev_tx_linkable {
+        let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}Prev Tx:  "), label),
+            Span::styled(data.previous_transaction.clone(), value_style),
+        ]));
+        *link_idx += 1;
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Prev Tx:  ", label),
+            Span::raw(data.previous_transaction.clone()),
+        ]));
+    }
     lines.push(Line::from(vec![
         Span::styled("  Rebate:   ", label),
         Span::raw(data.storage_rebate.to_string()),

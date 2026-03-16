@@ -473,6 +473,11 @@ impl App {
             }
             _ => {}
         }
+        if !data.previous_transaction.is_empty() {
+            links.push(InspectTarget::Transaction(
+                data.previous_transaction.clone(),
+            ));
+        }
         if let DynFieldsState::Loaded(fields) = &self.dyn_fields_state {
             for f in fields {
                 if let Some(id) = &f.child_id
@@ -2642,6 +2647,42 @@ mod tests {
         assert_eq!(
             app.current_view(),
             View::Inspector(InspectTarget::Object(owner_addr))
+        );
+    }
+
+    #[test]
+    fn object_inspector_prev_tx_link() {
+        let (mut app, _) = test_app();
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let owner_addr = Address::from_bytes([2u8; 32]).unwrap();
+        let child_addr = Address::from_bytes([3u8; 32]).unwrap();
+        let prev_tx = "SomeTxDigest123";
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        app.object_state = ObjectState::Loaded(ObjectData {
+            owner: OwnerInfo::Address(owner_addr.to_string()),
+            previous_transaction: prev_tx.to_string(),
+            ..ObjectData::empty()
+        });
+        app.dyn_fields_state = DynFieldsState::Loaded(vec![DynFieldInfo {
+            field_id: "f1".into(),
+            kind: DynFieldKind::Object,
+            value_type: "T".into(),
+            child_id: Some(child_addr.to_string()),
+        }]);
+        let links = app.inspector_links();
+        // owner, prev_tx, child
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], InspectTarget::Address(owner_addr));
+        assert_eq!(links[1], InspectTarget::Transaction(prev_tx.to_string()));
+        assert_eq!(links[2], InspectTarget::Object(child_addr));
+
+        // Navigate to prev tx link and press Enter
+        app.handle_key(key(KeyCode::Down)); // sel -> 1 (prev tx)
+        assert_eq!(app.inspector_sel, 1);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Transaction(prev_tx.to_string()))
         );
     }
 
