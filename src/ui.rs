@@ -315,7 +315,13 @@ fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {
                 &mut selected_line,
             );
             append_tx_gas_lines(&mut lines, detail);
-            append_tx_balance_changes_lines(&mut lines, detail);
+            append_tx_balance_changes_lines(
+                &mut lines,
+                detail,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
             append_tx_changed_objects_lines(
                 &mut lines,
                 detail,
@@ -474,9 +480,25 @@ fn append_tx_gas_lines<'a>(lines: &mut Vec<Line<'a>>, detail: &TransactionDetail
     ]));
 }
 
-fn append_tx_balance_changes_lines<'a>(lines: &mut Vec<Line<'a>>, detail: &TransactionDetail) {
+fn append_tx_balance_changes_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    detail: &TransactionDetail,
+    selected: usize,
+    link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
+) {
     if detail.balance_changes.is_empty() {
         return;
+    }
+
+    // Track seen addresses for dedup (initialized with tx-level sender)
+    let mut seen_addrs: Vec<&str> = Vec::new();
+    if detail
+        .sender
+        .parse::<Address>()
+        .is_ok_and(|a| is_inspectable_address(&a))
+    {
+        seen_addrs.push(detail.sender.as_str());
     }
 
     lines.push(Line::raw(""));
@@ -495,12 +517,54 @@ fn append_tx_balance_changes_lines<'a>(lines: &mut Vec<Line<'a>>, detail: &Trans
         } else {
             Style::default().fg(Color::Green)
         };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(coin.to_string(), Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled(amount, amount_style),
-        ]));
+
+        let addr_is_link = bc
+            .address
+            .parse::<Address>()
+            .is_ok_and(|a| is_inspectable_address(&a))
+            && !seen_addrs.contains(&bc.address.as_str());
+
+        if addr_is_link {
+            seen_addrs.push(bc.address.as_str());
+            let is_selected = *link_idx == selected;
+            if is_selected {
+                *selected_line = Some(lines.len() as u16);
+            }
+            let prefix = if is_selected { "> " } else { "  " };
+            let addr_style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let addr = bc.address.parse::<Address>().unwrap();
+            lines.push(Line::from(vec![
+                Span::raw(prefix.to_string()),
+                Span::styled(short_address(&addr), addr_style),
+                Span::raw("  "),
+                Span::styled(coin.to_string(), Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled(amount, amount_style),
+            ]));
+            *link_idx += 1;
+        } else if !bc.address.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(bc.address.clone(), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(coin.to_string(), Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled(amount, amount_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(coin.to_string(), Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled(amount, amount_style),
+            ]));
+        }
     }
 }
 

@@ -28,6 +28,7 @@ pub struct GasCostSummary {
 
 #[derive(Clone)]
 pub struct TxBalanceChange {
+    pub address: String,
     pub coin_type: String,
     pub amount: String,
     pub decimals: u32,
@@ -161,6 +162,7 @@ fn convert_transaction(tx: &ExecutedTransaction) -> TransactionSummary {
             .balance_changes
             .iter()
             .map(|bc| TxBalanceChange {
+                address: bc.address_opt().unwrap_or("").to_string(),
                 coin_type: bc.coin_type_opt().unwrap_or("").to_string(),
                 amount: bc.amount_opt().unwrap_or("").to_string(),
                 decimals: 0,
@@ -337,6 +339,7 @@ fn convert_tx_detail(tx: &ExecutedTransaction) -> TransactionDetail {
         .balance_changes
         .iter()
         .map(|bc| TxBalanceChange {
+            address: bc.address_opt().unwrap_or("").to_string(),
             coin_type: bc.coin_type_opt().unwrap_or("").to_string(),
             amount: bc.amount_opt().unwrap_or("").to_string(),
             decimals: 0,

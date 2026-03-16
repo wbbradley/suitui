@@ -565,6 +565,14 @@ impl App {
         {
             links.push(InspectTarget::Address(addr));
         }
+        for bc in &detail.balance_changes {
+            if let Ok(addr) = bc.address.parse::<Address>()
+                && Self::is_inspectable_address(&addr)
+                && !links.contains(&InspectTarget::Address(addr))
+            {
+                links.push(InspectTarget::Address(addr));
+            }
+        }
         for obj in &detail.changed_objects {
             if let Ok(addr) = obj.object_id.parse::<Address>()
                 && Self::is_inspectable_address(&addr)
@@ -2012,7 +2020,7 @@ mod tests {
         address_fetcher,
         config::{Account, Env, WalletData},
         object_fetcher::DynFieldKind,
-        transaction_fetcher::{TxDetailChangedObject, TxDetailEvent},
+        transaction_fetcher::{TxBalanceChange, TxDetailChangedObject, TxDetailEvent},
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -4465,6 +4473,72 @@ mod tests {
         assert_eq!(
             app.current_view(),
             View::Inspector(InspectTarget::Checkpoint(12345))
+        );
+    }
+
+    #[test]
+    fn tx_inspector_links_includes_balance_change_address() {
+        let (mut app, _) = test_app();
+        let sender_addr = Address::from_bytes([0xaa; 32]).unwrap();
+        let bc_addr = Address::from_bytes([0xbb; 32]).unwrap();
+        let obj_addr = Address::from_bytes([0xcc; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: sender_addr.to_string(),
+            success: Some(true),
+            gas_used: None,
+            changed_objects: vec![TxDetailChangedObject {
+                object_id: obj_addr.to_string(),
+                object_type: "0x2::coin::Coin".into(),
+                id_operation: "Modified".into(),
+            }],
+            events: vec![],
+            balance_changes: vec![TxBalanceChange {
+                address: bc_addr.to_string(),
+                coin_type: "0x2::sui::SUI".into(),
+                amount: "1500000000".into(),
+                decimals: 9,
+            }],
+        });
+        let links = app.inspector_links();
+        // Order: sender, balance change address, changed object
+        assert_eq!(links[0], InspectTarget::Address(sender_addr));
+        assert_eq!(links[1], InspectTarget::Address(bc_addr));
+        assert_eq!(links[2], InspectTarget::Object(obj_addr));
+    }
+
+    #[test]
+    fn tx_inspector_links_deduplicates_balance_change_sender() {
+        let (mut app, _) = test_app();
+        let sender_addr = Address::from_bytes([0xaa; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: None,
+            sender: sender_addr.to_string(),
+            success: Some(true),
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![],
+            balance_changes: vec![TxBalanceChange {
+                address: sender_addr.to_string(),
+                coin_type: "0x2::sui::SUI".into(),
+                amount: "-500000000".into(),
+                decimals: 9,
+            }],
+        });
+        let links = app.inspector_links();
+        // Sender should appear only once (not duplicated by balance change)
+        assert_eq!(
+            links
+                .iter()
+                .filter(|l| **l == InspectTarget::Address(sender_addr))
+                .count(),
+            1
         );
     }
 }
