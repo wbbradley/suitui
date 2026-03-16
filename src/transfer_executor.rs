@@ -1,12 +1,13 @@
 use std::time::Duration;
 
+use prost_types::FieldMask;
 use sui_crypto::{
     SuiSigner,
     ed25519::Ed25519PrivateKey,
     secp256k1::Secp256k1PrivateKey,
     secp256r1::Secp256r1PrivateKey,
 };
-use sui_rpc::{Client, proto::sui::rpc::v2::ExecuteTransactionRequest};
+use sui_rpc::{Client, field::FieldMaskUtil, proto::sui::rpc::v2::ExecuteTransactionRequest};
 use sui_sdk_types::{Address, StructTag};
 use sui_transaction_builder::{TransactionBuilder, intent::CoinWithBalance};
 use tokio::sync::mpsc;
@@ -80,8 +81,9 @@ async fn execute_transfer_inner(params: TransferParams, rpc_url: &str) -> Result
 
     let signature = sign_transaction(&params.key_scheme, &params.private_key_bytes, &transaction)?;
 
-    let request =
-        ExecuteTransactionRequest::new(transaction.into()).with_signatures(vec![signature.into()]);
+    let request = ExecuteTransactionRequest::new(transaction.into())
+        .with_signatures(vec![signature.into()])
+        .with_read_mask(FieldMask::from_str("digest"));
 
     let response = client
         .execute_transaction_and_wait_for_checkpoint(request, Duration::from_secs(30))
