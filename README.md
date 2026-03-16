@@ -76,6 +76,13 @@ suitui --config /path/to/client.yaml
 - **Coins** — Coin balances for the selected account, fetched via gRPC.
 - **Network Info** — Active environment, RPC endpoint, chain ID, and account.
 
+## Disclaimer
+
+This software is provided as-is, with no warranty of any kind. The authors are not responsible for
+any loss of funds, tokens, or digital assets, nor for any security or privacy issues that may arise
+from using this software. You are solely responsible for your accounts, keys, and transactions.
+Use at your own risk.
+
 ## License
 
 MIT
