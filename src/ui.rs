@@ -215,14 +215,30 @@ fn append_tx_summary_lines<'a>(
         Span::raw(ts_str),
     ]));
 
-    let cp_str = detail
-        .checkpoint
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "\u{2014}".into());
-    lines.push(Line::from(vec![
-        Span::styled("  Checkpoint: ", label),
-        Span::raw(cp_str),
-    ]));
+    if let Some(cp) = detail.checkpoint {
+        let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}Checkpoint: "), label),
+            Span::styled(cp.to_string(), value_style),
+        ]));
+        *link_idx += 1;
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Checkpoint: ", label),
+            Span::raw("\u{2014}"),
+        ]));
+    }
 
     // Sender is a navigable link (Address)
     let sender_linkable = detail.sender.parse::<Address>().is_ok();
@@ -839,7 +855,7 @@ fn draw_address_input(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(err_line, err_area);
     }
 
-    let help = Paragraph::new("Hex Object ID / Address, or base58 Tx Digest")
+    let help = Paragraph::new("Object ID / Address, Tx Digest, or Checkpoint #")
         .style(Style::default().fg(Color::DarkGray));
     let help_area = Rect::new(
         inner.x,

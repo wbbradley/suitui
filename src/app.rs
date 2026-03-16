@@ -480,7 +480,7 @@ impl App {
             View::Inspector(InspectTarget::Object(_)) => self.object_inspector_links(),
             View::Inspector(InspectTarget::Address(_)) => self.address_inspector_links(),
             View::Inspector(InspectTarget::Transaction(_)) => self.tx_inspector_links(),
-            View::Inspector(InspectTarget::Checkpoint(_)) => vec![],
+            View::Inspector(InspectTarget::Checkpoint(_)) => self.checkpoint_inspector_links(),
             _ => Vec::new(),
         }
     }
@@ -538,6 +538,9 @@ impl App {
         let TxDetailState::Loaded(detail) = &self.tx_detail_state else {
             return links;
         };
+        if let Some(cp) = detail.checkpoint {
+            links.push(InspectTarget::Checkpoint(cp));
+        }
         if let Ok(addr) = detail.sender.parse::<Address>() {
             links.push(InspectTarget::Address(addr));
         }
@@ -557,6 +560,17 @@ impl App {
             {
                 links.push(InspectTarget::Address(addr));
             }
+        }
+        links
+    }
+
+    fn checkpoint_inspector_links(&self) -> Vec<InspectTarget> {
+        let mut links = Vec::new();
+        let CheckpointState::Loaded(data) = &self.checkpoint_state else {
+            return links;
+        };
+        for digest in &data.transaction_digests {
+            links.push(InspectTarget::Transaction(digest.clone()));
         }
         links
     }
@@ -712,7 +726,13 @@ impl App {
             }
             KeyCode::Enter => {
                 let input = self.address_input.trim().to_string();
-                if let Ok(addr) = input.parse::<Address>() {
+                if let Ok(seq) = input.parse::<u64>() {
+                    self.address_input_open = false;
+                    self.address_input.clear();
+                    self.address_input_error = None;
+                    self.push_view(View::Inspector(InspectTarget::Checkpoint(seq)));
+                    AppAction::Redraw
+                } else if let Ok(addr) = input.parse::<Address>() {
                     self.address_input_open = false;
                     self.address_input.clear();
                     self.address_input_error = None;
@@ -1714,8 +1734,46 @@ impl App {
                 self.pop_view();
                 AppAction::Redraw
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_inspector_selection(-1);
+                AppAction::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_inspector_selection(1);
+                AppAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.inspect_selected_link();
+                AppAction::Redraw
+            }
+            KeyCode::Char('r') => {
+                self.force_refresh_checkpoint();
+                AppAction::Redraw
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection(self.half_page());
+                AppAction::Redraw
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_inspector_selection(-self.half_page());
+                AppAction::Redraw
+            }
             _ => AppAction::None,
         }
+    }
+
+    fn force_refresh_checkpoint(&mut self) {
+        let View::Inspector(InspectTarget::Checkpoint(seq)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let key = (seq, env.rpc.clone());
+        self.inspector_sel = 0;
+        self.checkpoint_cache.remove(&key);
+        self.checkpoint_inflight = None;
+        self.checkpoint_displayed_key = None;
     }
 
     pub fn maybe_trigger_checkpoint_fetch(&mut self) {
@@ -4248,5 +4306,103 @@ mod tests {
             outcome: Err("not found".into()),
         });
         assert!(matches!(app.checkpoint_state, CheckpointState::Error(_)));
+    }
+
+    #[test]
+    fn checkpoint_inspector_navigate_links() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        let mut data = CheckpointData::empty();
+        data.transaction_digests = vec!["tx1".into(), "tx2".into(), "tx3".into()];
+        app.checkpoint_state = CheckpointState::Loaded(data);
+        assert_eq!(app.inspector_sel, 0);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.inspector_sel, 1);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.inspector_sel, 0);
+    }
+
+    #[test]
+    fn checkpoint_inspector_links_from_loaded_data() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        let mut data = CheckpointData::empty();
+        data.transaction_digests = vec!["tx_a".into(), "tx_b".into()];
+        app.checkpoint_state = CheckpointState::Loaded(data);
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], InspectTarget::Transaction("tx_a".into()));
+        assert_eq!(links[1], InspectTarget::Transaction("tx_b".into()));
+    }
+
+    #[test]
+    fn checkpoint_inspector_enter_follows_link() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        let mut data = CheckpointData::empty();
+        data.transaction_digests = vec!["tx_follow".into()];
+        app.checkpoint_state = CheckpointState::Loaded(data);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Transaction("tx_follow".into()))
+        );
+    }
+
+    #[test]
+    fn checkpoint_inspector_r_refreshes() {
+        let (mut app, _) = test_app();
+        let rpc = app.active_env_info().unwrap().rpc.clone();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        app.checkpoint_cache.insert(
+            (42u64, rpc.clone()),
+            CheckpointCacheEntry {
+                data: CheckpointData::empty(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.checkpoint_displayed_key = Some((42, rpc.clone()));
+        app.checkpoint_state = CheckpointState::Loaded(CheckpointData::empty());
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(!app.checkpoint_cache.contains_key(&(42u64, rpc)));
+        assert!(app.checkpoint_displayed_key.is_none());
+        assert_eq!(app.inspector_sel, 0);
+    }
+
+    #[test]
+    fn tx_inspector_links_includes_checkpoint() {
+        let (mut app, _) = test_app();
+        let sender_addr = Address::from_bytes([0xaa; 32]).unwrap();
+        app.push_view(View::Inspector(InspectTarget::Transaction("d".into())));
+        app.tx_detail_state = TxDetailState::Loaded(TransactionDetail {
+            digest: "d".into(),
+            timestamp: None,
+            checkpoint: Some(999),
+            sender: sender_addr.to_string(),
+            success: Some(true),
+            gas_used: None,
+            changed_objects: vec![],
+            events: vec![],
+            balance_changes: vec![],
+        });
+        let links = app.inspector_links();
+        assert!(links.contains(&InspectTarget::Checkpoint(999)));
+        // Checkpoint comes before sender in link order
+        assert_eq!(links[0], InspectTarget::Checkpoint(999));
+        assert_eq!(links[1], InspectTarget::Address(sender_addr));
+    }
+
+    #[test]
+    fn address_input_numeric_opens_checkpoint() {
+        let (mut app, _) = test_app();
+        app.address_input_open = true;
+        app.address_input = "12345".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.address_input_open);
+        assert_eq!(
+            app.current_view(),
+            View::Inspector(InspectTarget::Checkpoint(12345))
+        );
     }
 }
