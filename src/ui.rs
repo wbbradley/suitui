@@ -1885,9 +1885,13 @@ fn append_metadata_lines<'a>(
         Span::raw(data.storage_rebate.to_string()),
     ]));
     if let Some(bal) = data.balance {
+        let formatted = match data.coin_decimals {
+            Some(d) => format_balance(bal, d),
+            None => bal.to_string(),
+        };
         lines.push(Line::from(vec![
             Span::styled("  Balance:  ", label),
-            Span::raw(bal.to_string()),
+            Span::raw(formatted),
         ]));
     }
 }

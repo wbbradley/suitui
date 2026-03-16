@@ -28,6 +28,7 @@ pub struct ObjectData {
     pub previous_transaction: String,
     pub storage_rebate: u64,
     pub balance: Option<u64>,
+    pub coin_decimals: Option<u32>,
 }
 
 impl ObjectData {
@@ -41,6 +42,7 @@ impl ObjectData {
             previous_transaction: String::new(),
             storage_rebate: 0,
             balance: None,
+            coin_decimals: None,
         }
     }
 }
@@ -133,7 +135,12 @@ async fn fetch_object(object_id: &Address, rpc_url: &str) -> Result<ObjectData, 
             }
         })?;
     let obj = resp.into_inner().object.ok_or(OBJECT_NOT_FOUND)?;
-    Ok(convert_object(&obj))
+    let mut data = convert_object(&obj);
+    if let Some(coin_type) = extract_coin_type(&data.object_type) {
+        data.coin_decimals =
+            Some(crate::coin_fetcher::fetch_coin_decimals(&mut client, &coin_type).await);
+    }
+    Ok(data)
 }
 
 async fn fetch_dyn_fields(parent_id: &Address, rpc_url: &str) -> Result<Vec<DynFieldInfo>, String> {
@@ -153,6 +160,13 @@ async fn fetch_dyn_fields(parent_id: &Address, rpc_url: &str) -> Result<Vec<DynF
     Ok(fields)
 }
 
+fn extract_coin_type(object_type: &str) -> Option<String> {
+    let marker = "::coin::Coin<";
+    let start = object_type.find(marker)? + marker.len();
+    let end = object_type[start..].find('>')? + start;
+    Some(object_type[start..end].to_string())
+}
+
 fn convert_object(obj: &Object) -> ObjectData {
     ObjectData {
         version: obj.version_opt().unwrap_or(0),
@@ -166,6 +180,7 @@ fn convert_object(obj: &Object) -> ObjectData {
         previous_transaction: obj.previous_transaction_opt().unwrap_or("").to_string(),
         storage_rebate: obj.storage_rebate_opt().unwrap_or(0),
         balance: obj.balance_opt(),
+        coin_decimals: None,
     }
 }
 
@@ -250,5 +265,18 @@ mod tests {
     fn prost_value_to_json_null() {
         let val = prost_types::Value { kind: None };
         assert_eq!(prost_value_to_json(&val), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn extract_coin_type_sui() {
+        assert_eq!(
+            extract_coin_type("0x2::coin::Coin<0x2::sui::SUI>"),
+            Some("0x2::sui::SUI".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_coin_type_non_coin() {
+        assert_eq!(extract_coin_type("0x2::kiosk::Kiosk"), None);
     }
 }
