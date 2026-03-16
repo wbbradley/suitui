@@ -25,6 +25,7 @@ use crate::{
         TxDetailState,
         TxHistoryState,
         View,
+        is_inspectable_address,
     },
     checkpoint_fetcher::CheckpointData,
     coin_fetcher::{SUI_DECIMALS, format_balance, format_signed_balance, short_coin_type},
@@ -390,7 +391,10 @@ fn append_tx_summary_lines<'a>(
     }
 
     // Sender is a navigable link (Address)
-    let sender_linkable = detail.sender.parse::<Address>().is_ok();
+    let sender_linkable = detail
+        .sender
+        .parse::<Address>()
+        .is_ok_and(|a| is_inspectable_address(&a));
     if sender_linkable {
         let is_selected = *link_idx == selected;
         if is_selected {
@@ -520,7 +524,10 @@ fn append_tx_changed_objects_lines<'a>(
         Style::default().fg(Color::Cyan),
     ));
     for obj in &detail.changed_objects {
-        let is_linkable = obj.object_id.parse::<Address>().is_ok();
+        let is_linkable = obj
+            .object_id
+            .parse::<Address>()
+            .is_ok_and(|a| is_inspectable_address(&a));
         if is_linkable {
             let is_selected = *link_idx == selected;
             if is_selected {
@@ -572,7 +579,11 @@ fn append_tx_events_lines<'a>(
 
     // Track seen senders for dedup (initialized with tx-level sender)
     let mut seen_senders: Vec<&str> = Vec::new();
-    if detail.sender.parse::<Address>().is_ok() {
+    if detail
+        .sender
+        .parse::<Address>()
+        .is_ok_and(|a| is_inspectable_address(&a))
+    {
         seen_senders.push(detail.sender.as_str());
     }
 
@@ -590,7 +601,10 @@ fn append_tx_events_lines<'a>(
         }
 
         // Package ID is a navigable link if parseable and NOT already in changed_objects
-        let pkg_is_link = evt.package_id.parse::<Address>().is_ok()
+        let pkg_is_link = evt
+            .package_id
+            .parse::<Address>()
+            .is_ok_and(|a| is_inspectable_address(&a))
             && !changed_ids.contains(&evt.package_id.as_str());
         if pkg_is_link {
             let is_selected = *link_idx == selected;
@@ -621,8 +635,11 @@ fn append_tx_events_lines<'a>(
             ]));
         }
 
-        let sender_is_link =
-            evt.sender.parse::<Address>().is_ok() && !seen_senders.contains(&evt.sender.as_str());
+        let sender_is_link = evt
+            .sender
+            .parse::<Address>()
+            .is_ok_and(|a| is_inspectable_address(&a))
+            && !seen_senders.contains(&evt.sender.as_str());
         if sender_is_link {
             seen_senders.push(evt.sender.as_str());
             let is_selected = *link_idx == selected;
@@ -643,7 +660,11 @@ fn append_tx_events_lines<'a>(
                 Span::styled(evt.sender.clone(), value_style),
             ]));
             *link_idx += 1;
-        } else if evt.sender.parse::<Address>().is_ok() {
+        } else if evt
+            .sender
+            .parse::<Address>()
+            .is_ok_and(|a| is_inspectable_address(&a))
+        {
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(
@@ -1740,7 +1761,7 @@ fn append_metadata_lines<'a>(
         Span::raw(data.digest.clone()),
     ]));
 
-    let owner_is_linkable = matches!(&data.owner, OwnerInfo::Address(a) | OwnerInfo::Object(a) if a.parse::<Address>().is_ok());
+    let owner_is_linkable = matches!(&data.owner, OwnerInfo::Address(a) | OwnerInfo::Object(a) if a.parse::<Address>().is_ok_and(|a| is_inspectable_address(&a)));
     if owner_is_linkable {
         let is_selected = *link_idx == selected;
         if is_selected {
@@ -1914,10 +1935,10 @@ fn append_dyn_fields_lines<'a>(
                         DynFieldKind::Object => "Object",
                         DynFieldKind::Unknown => "???   ",
                     };
-                    let is_linkable = f.child_id.is_some()
-                        && f.child_id
-                            .as_ref()
-                            .is_some_and(|id| id.parse::<Address>().is_ok());
+                    let is_linkable = f.child_id.as_ref().is_some_and(|id| {
+                        id.parse::<Address>()
+                            .is_ok_and(|a| is_inspectable_address(&a))
+                    });
                     if is_linkable {
                         let is_selected = *link_idx == selected;
                         if is_selected {

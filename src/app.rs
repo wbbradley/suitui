@@ -312,6 +312,10 @@ pub struct App {
     pub checkpoint_rx: mpsc::UnboundedReceiver<CheckpointFetchResult>,
 }
 
+pub(crate) fn is_inspectable_address(addr: &Address) -> bool {
+    *addr != Address::ZERO
+}
+
 impl App {
     pub fn new(data: WalletData) -> Self {
         let accounts: Vec<(Address, String)> = data
@@ -485,6 +489,10 @@ impl App {
         }
     }
 
+    fn is_inspectable_address(addr: &Address) -> bool {
+        is_inspectable_address(addr)
+    }
+
     fn object_inspector_links(&self) -> Vec<InspectTarget> {
         let mut links = Vec::new();
         let ObjectState::Loaded(data) = &self.object_state else {
@@ -492,12 +500,16 @@ impl App {
         };
         match &data.owner {
             OwnerInfo::Address(a) => {
-                if let Ok(addr) = a.parse::<Address>() {
+                if let Ok(addr) = a.parse::<Address>()
+                    && Self::is_inspectable_address(&addr)
+                {
                     links.push(InspectTarget::Address(addr));
                 }
             }
             OwnerInfo::Object(a) => {
-                if let Ok(addr) = a.parse::<Address>() {
+                if let Ok(addr) = a.parse::<Address>()
+                    && Self::is_inspectable_address(&addr)
+                {
                     links.push(InspectTarget::Object(addr));
                 }
             }
@@ -512,6 +524,7 @@ impl App {
             for f in fields {
                 if let Some(id) = &f.child_id
                     && let Ok(addr) = id.parse::<Address>()
+                    && Self::is_inspectable_address(&addr)
                 {
                     links.push(InspectTarget::Object(addr));
                 }
@@ -526,7 +539,9 @@ impl App {
             return links;
         };
         for obj in &data.owned_objects {
-            if let Ok(addr) = obj.object_id.parse::<Address>() {
+            if let Ok(addr) = obj.object_id.parse::<Address>()
+                && Self::is_inspectable_address(&addr)
+            {
                 links.push(InspectTarget::Object(addr));
             }
         }
@@ -541,21 +556,27 @@ impl App {
         if let Some(cp) = detail.checkpoint {
             links.push(InspectTarget::Checkpoint(cp));
         }
-        if let Ok(addr) = detail.sender.parse::<Address>() {
+        if let Ok(addr) = detail.sender.parse::<Address>()
+            && Self::is_inspectable_address(&addr)
+        {
             links.push(InspectTarget::Address(addr));
         }
         for obj in &detail.changed_objects {
-            if let Ok(addr) = obj.object_id.parse::<Address>() {
+            if let Ok(addr) = obj.object_id.parse::<Address>()
+                && Self::is_inspectable_address(&addr)
+            {
                 links.push(InspectTarget::Object(addr));
             }
         }
         for evt in &detail.events {
             if let Ok(addr) = evt.package_id.parse::<Address>()
+                && Self::is_inspectable_address(&addr)
                 && !links.contains(&InspectTarget::Object(addr))
             {
                 links.push(InspectTarget::Object(addr));
             }
             if let Ok(addr) = evt.sender.parse::<Address>()
+                && Self::is_inspectable_address(&addr)
                 && !links.contains(&InspectTarget::Address(addr))
             {
                 links.push(InspectTarget::Address(addr));
@@ -735,7 +756,9 @@ impl App {
                     self.address_input_error = None;
                     self.push_view(View::Inspector(InspectTarget::Checkpoint(seq)));
                     AppAction::Redraw
-                } else if let Ok(addr) = input.parse::<Address>() {
+                } else if let Ok(addr) = input.parse::<Address>()
+                    && Self::is_inspectable_address(&addr)
+                {
                     self.address_input_open = false;
                     self.address_input.clear();
                     self.address_input_error = None;
