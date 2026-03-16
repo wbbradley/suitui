@@ -1098,7 +1098,8 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 9u16 + TRANSFER_HEADER_LINES;
+    let disclaimer_lines: u16 = if state.is_mainnet { 7 } else { 0 };
+    let height = 9u16 + TRANSFER_HEADER_LINES + disclaimer_lines;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -1108,7 +1109,11 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title("Send — Review (4/4)")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(if state.is_mainnet {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        }));
 
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
@@ -1154,7 +1159,40 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     let summary_area = Rect::new(inner.x, content_top, inner.width, 3);
     frame.render_widget(summary, summary_area);
 
-    let help = Paragraph::new("Enter: Send  Esc: Back").style(Style::default().fg(Color::DarkGray));
+    if state.is_mainnet {
+        let warn_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let warn_text_style = Style::default().fg(Color::Yellow);
+        let disclaimer = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled("WARNING", warn_style)),
+            Line::styled(
+                "This software is provided as-is, with no warranty.",
+                warn_text_style,
+            ),
+            Line::styled(
+                "You are sending real assets on Sui mainnet.",
+                warn_text_style,
+            ),
+            Line::styled(
+                "The authors accept no liability for lost funds.",
+                warn_text_style,
+            ),
+            Line::styled(
+                "By pressing Enter you confirm you accept all risks",
+                warn_text_style,
+            ),
+            Line::styled("and proceed at your own discretion.", warn_text_style),
+        ]);
+        let disclaimer_area = Rect::new(inner.x, content_top + 3, inner.width, 8);
+        frame.render_widget(disclaimer, disclaimer_area);
+    }
+
+    let help_text = if state.is_mainnet {
+        "Enter: Confirm & Send  Esc: Back"
+    } else {
+        "Enter: Send  Esc: Back"
+    };
+    let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
     let help_area = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1),
