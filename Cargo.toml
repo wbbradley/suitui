@@ -1,6 +1,6 @@
 [package]
 name = "suitui"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "A terminal UI for managing your Sui wallet"
 license = "MIT"
