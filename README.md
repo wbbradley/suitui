@@ -60,10 +60,10 @@ suitui --config /path/to/client.yaml
 
 ```
 ┌─ Accounts ──────────────┐┌─ Network Info ──────────┐
-│ * alice  0xabc...1234   ││ Env:     testnet         │
-│   bob    0xdef...5678   ││ RPC:     https://...     │
-│                         ││ Chain:   4c78...         │
-│                         ││ Account: alice           │
+│ * alice  0xabc...1234   ││ Env:     testnet        │
+│   bob    0xdef...5678   ││ RPC:     https://...    │
+│                         ││ Chain:   4c78...        │
+│                         ││ Account: alice          │
 ├─ Coins ─────────────────┤│                         │
 │ SUI          12.500     ││                         │
 │ USDC          5.000     ││                         │
