@@ -1935,18 +1935,27 @@ fn append_dyn_fields_lines<'a>(
                         DynFieldKind::Object => "Object",
                         DynFieldKind::Unknown => "???   ",
                     };
-                    let is_linkable = f.child_id.as_ref().is_some_and(|id| {
-                        id.parse::<Address>()
-                            .is_ok_and(|a| is_inspectable_address(&a))
-                    });
-                    if is_linkable {
+                    let link_target: Option<&str> = f
+                        .child_id
+                        .as_ref()
+                        .filter(|id| {
+                            id.parse::<Address>()
+                                .is_ok_and(|a| is_inspectable_address(&a))
+                        })
+                        .map(|s| s.as_str())
+                        .or_else(|| {
+                            f.field_id
+                                .parse::<Address>()
+                                .is_ok_and(|a| is_inspectable_address(&a))
+                                .then_some(f.field_id.as_str())
+                        });
+                    if let Some(target) = link_target {
                         let is_selected = *link_idx == selected;
                         if is_selected {
                             *selected_line = Some(lines.len() as u16);
                         }
                         let prefix = if is_selected { "> " } else { "  " };
-                        let child = f.child_id.clone().unwrap_or_default();
-                        let child_style = if is_selected {
+                        let target_style = if is_selected {
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
@@ -1961,7 +1970,7 @@ fn append_dyn_fields_lines<'a>(
                                 f.field_id,
                                 shorten_package_ids(&f.value_type)
                             )),
-                            Span::styled(child, child_style),
+                            Span::styled(target.to_string(), target_style),
                         ]));
                         *link_idx += 1;
                     } else {

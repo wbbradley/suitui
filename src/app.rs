@@ -527,6 +527,10 @@ impl App {
                     && Self::is_inspectable_address(&addr)
                 {
                     links.push(InspectTarget::Object(addr));
+                } else if let Ok(addr) = f.field_id.parse::<Address>()
+                    && Self::is_inspectable_address(&addr)
+                {
+                    links.push(InspectTarget::Object(addr));
                 }
             }
         }
@@ -2756,9 +2760,15 @@ mod tests {
             },
         ]);
         let links = app.inspector_links();
-        assert_eq!(links.len(), 2);
+        // owner + child_id link + field_id fallback link
+        assert_eq!(links.len(), 3);
         assert_eq!(links[0], InspectTarget::Address(owner_addr));
         assert_eq!(links[1], InspectTarget::Object(child_addr));
+        // "f2" parses as a valid Address; field_id fallback makes it navigable
+        assert_eq!(
+            links[2],
+            InspectTarget::Object("f2".parse::<Address>().unwrap())
+        );
     }
 
     #[test]
