@@ -26,6 +26,7 @@ use crate::{
         TxHistoryState,
         View,
     },
+    checkpoint_fetcher::CheckpointData,
     coin_fetcher::{SUI_DECIMALS, format_balance, format_signed_balance, short_coin_type},
     object_fetcher::{DynFieldKind, OBJECT_NOT_FOUND, ObjectData, OwnerInfo},
     transaction_fetcher::{self, TransactionDetail, TransactionSummary, TxBalanceChange},
@@ -79,44 +80,192 @@ fn draw_checkpoint_inspector(frame: &mut Frame, app: &App, seq: u64) {
             frame.render_widget(p, content_area);
         }
         CheckpointState::Loaded(data) => {
+            let selected = app.inspector_sel;
+            let mut link_idx = 0usize;
+            let mut selected_line = None;
             let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                Span::styled("  Sequence: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(data.sequence_number.to_string()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  Digest:   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(&data.digest),
-            ]));
-            if let Some(epoch) = data.epoch {
-                lines.push(Line::from(vec![
-                    Span::styled("  Epoch:    ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(epoch.to_string()),
-                ]));
-            }
-            if let Some(ts) = &data.timestamp {
-                lines.push(Line::from(vec![
-                    Span::styled("  Time:     ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(transaction_fetcher::format_timestamp(ts)),
-                ]));
-            }
-            lines.push(Line::from(vec![
-                Span::styled("  Tx Count: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(data.transaction_count.to_string()),
-            ]));
-            if data.is_end_of_epoch {
-                lines.push(Line::from(Span::styled(
-                    "  [End of Epoch]",
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
+            append_checkpoint_summary_lines(
+                &mut lines,
+                data,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
+            append_checkpoint_gas_lines(&mut lines, data);
+            append_checkpoint_transactions_lines(
+                &mut lines,
+                data,
+                selected,
+                &mut link_idx,
+                &mut selected_line,
+            );
 
-            let p = Paragraph::new(lines).block(block);
+            let visible_height = content_area.height.saturating_sub(2);
+            let scroll = compute_scroll(selected_line, visible_height);
+            let p = Paragraph::new(lines).block(block).scroll((scroll, 0));
             frame.render_widget(p, content_area);
         }
     }
 
     draw_inspector_help_bar(frame, help_area);
+}
+
+fn append_checkpoint_summary_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    data: &CheckpointData,
+    selected: usize,
+    link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
+) {
+    let label = Style::default().fg(Color::Gray);
+
+    lines.push(Line::from(vec![
+        Span::styled("  Sequence:    ", label),
+        Span::raw(data.sequence_number.to_string()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Digest:      ", label),
+        Span::raw(data.digest.clone()),
+    ]));
+    if let Some(epoch) = data.epoch {
+        lines.push(Line::from(vec![
+            Span::styled("  Epoch:       ", label),
+            Span::raw(epoch.to_string()),
+        ]));
+    }
+    if let Some(ts) = &data.timestamp {
+        lines.push(Line::from(vec![
+            Span::styled("  Timestamp:   ", label),
+            Span::raw(transaction_fetcher::format_timestamp(ts)),
+        ]));
+    }
+    if let Some(net_txs) = data.total_network_transactions {
+        lines.push(Line::from(vec![
+            Span::styled("  Network Txs: ", label),
+            Span::raw(net_txs.to_string()),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  Content Dgst:", label),
+        Span::raw(format!(" {}", data.content_digest)),
+    ]));
+    if let Some(prev) = &data.previous_digest {
+        lines.push(Line::from(vec![
+            Span::styled("  Prev Digest: ", label),
+            Span::raw(prev.clone()),
+        ]));
+    }
+
+    // Prev Ckpt — navigable link when seq > 0
+    if data.sequence_number > 0 {
+        let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}Prev Ckpt:   "), label),
+            Span::styled((data.sequence_number - 1).to_string(), value_style),
+        ]));
+        *link_idx += 1;
+    }
+
+    if data.is_end_of_epoch {
+        lines.push(Line::from(Span::styled(
+            "  [End of Epoch]",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+}
+
+fn append_checkpoint_gas_lines<'a>(lines: &mut Vec<Line<'a>>, data: &CheckpointData) {
+    let Some(gas) = &data.gas_summary else {
+        return;
+    };
+    let label = Style::default().fg(Color::Gray);
+    let net = (gas.computation_cost + gas.storage_cost) as i64 - gas.storage_rebate as i64;
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  \u{2500}\u{2500} Epoch Rolling Gas \u{2500}\u{2500}",
+        Style::default().fg(Color::Cyan),
+    ));
+    lines.push(Line::from(vec![
+        Span::styled("  Computation: ", label),
+        Span::raw(format_balance(gas.computation_cost, SUI_DECIMALS)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Storage:     ", label),
+        Span::raw(format_balance(gas.storage_cost, SUI_DECIMALS)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Rebate:      ", label),
+        Span::raw(format!(
+            "-{}",
+            format_balance(gas.storage_rebate, SUI_DECIMALS)
+        )),
+    ]));
+    let net_str = if net < 0 {
+        format!("-{}", format_balance((-net) as u64, SUI_DECIMALS))
+    } else {
+        format_balance(net as u64, SUI_DECIMALS)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Net:         ", label),
+        Span::styled(net_str, Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+}
+
+fn append_checkpoint_transactions_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    data: &CheckpointData,
+    selected: usize,
+    link_idx: &mut usize,
+    selected_line: &mut Option<u16>,
+) {
+    if data.transaction_digests.is_empty() {
+        return;
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  \u{2500}\u{2500} Transactions ({}) \u{2500}\u{2500}",
+            data.transaction_count
+        ),
+        Style::default().fg(Color::Cyan),
+    ));
+    for digest in &data.transaction_digests {
+        let short = if digest.len() > 16 {
+            format!("{}..{}", &digest[..8], &digest[digest.len() - 6..])
+        } else {
+            digest.clone()
+        };
+        let is_selected = *link_idx == selected;
+        if is_selected {
+            *selected_line = Some(lines.len() as u16);
+        }
+        let prefix = if is_selected { "> " } else { "  " };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(short, value_style),
+        ]));
+        *link_idx += 1;
+    }
 }
 
 fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {

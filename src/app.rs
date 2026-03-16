@@ -569,6 +569,9 @@ impl App {
         let CheckpointState::Loaded(data) = &self.checkpoint_state else {
             return links;
         };
+        if data.sequence_number > 0 {
+            links.push(InspectTarget::Checkpoint(data.sequence_number - 1));
+        }
         for digest in &data.transaction_digests {
             links.push(InspectTarget::Transaction(digest.clone()));
         }
@@ -4333,6 +4336,32 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0], InspectTarget::Transaction("tx_a".into()));
         assert_eq!(links[1], InspectTarget::Transaction("tx_b".into()));
+    }
+
+    #[test]
+    fn checkpoint_inspector_links_includes_prev_checkpoint() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(10)));
+        let mut data = CheckpointData::empty();
+        data.sequence_number = 10;
+        data.transaction_digests = vec!["tx_a".into()];
+        app.checkpoint_state = CheckpointState::Loaded(data);
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], InspectTarget::Checkpoint(9));
+        assert_eq!(links[1], InspectTarget::Transaction("tx_a".into()));
+    }
+
+    #[test]
+    fn checkpoint_inspector_links_no_prev_at_zero() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(0)));
+        let mut data = CheckpointData::empty();
+        data.transaction_digests = vec!["tx_a".into()];
+        app.checkpoint_state = CheckpointState::Loaded(data);
+        let links = app.inspector_links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], InspectTarget::Transaction("tx_a".into()));
     }
 
     #[test]
