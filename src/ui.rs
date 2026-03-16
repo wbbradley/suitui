@@ -34,6 +34,10 @@ use crate::{
     transfer_executor::TransferResult,
 };
 
+fn depth_prefix(app: &App) -> String {
+    ">".repeat(app.view_stack.len().saturating_sub(1))
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.last_viewport_height = frame.area().height;
     match app.current_view() {
@@ -58,7 +62,7 @@ fn draw_checkpoint_inspector(frame: &mut Frame, app: &App, seq: u64) {
     let help_area = outer[1];
 
     let block = Block::default()
-        .title(format!("Checkpoint: {seq}"))
+        .title(format!("{}Checkpoint: {seq}", depth_prefix(app)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -280,7 +284,7 @@ fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {
         digest.clone()
     };
     let block = Block::default()
-        .title(format!("Transaction: {short_digest}"))
+        .title(format!("{}Transaction: {short_digest}", depth_prefix(app)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -1699,7 +1703,7 @@ fn draw_object_inspector(frame: &mut Frame, app: &App, addr: Address) {
     let help_area = outer[1];
 
     let block = Block::default()
-        .title(format!("Object Inspector: {}", addr))
+        .title(format!("{}Object Inspector: {}", depth_prefix(app), addr))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -2117,7 +2121,7 @@ fn draw_address_inspector(frame: &mut Frame, app: &App, addr: Address) {
     let help_area = outer[1];
 
     let block = Block::default()
-        .title(format!("Address Inspector: {}", addr))
+        .title(format!("{}Address Inspector: {}", depth_prefix(app), addr))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -2236,7 +2240,11 @@ fn draw_transaction_history(frame: &mut Frame, app: &mut App, addr: Address) {
 
     let alias = alias_for(app, Some(addr)).unwrap_or("unknown");
     let block = Block::default()
-        .title(format!("Transaction History: {}", alias))
+        .title(format!(
+            "{}Transaction History: {}",
+            depth_prefix(app),
+            alias
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -2469,5 +2477,39 @@ mod tests {
     #[test]
     fn shorten_package_ids_no_match() {
         assert_eq!(shorten_package_ids("bare_type"), "bare_type");
+    }
+
+    #[test]
+    fn depth_prefix_matches_stack_depth() {
+        use std::path::PathBuf;
+
+        use crate::config::{Account, Env, WalletData};
+
+        let addr = Address::from_bytes([1u8; 32]).unwrap();
+        let data = WalletData {
+            accounts: vec![Account {
+                address: addr,
+                alias: "a".into(),
+            }],
+            envs: vec![Env {
+                alias: "test".into(),
+                rpc: "http://localhost".into(),
+                chain_id: None,
+            }],
+            active_address: Some(addr),
+            active_env: Some("test".into()),
+            config_path: PathBuf::from("/tmp/fake"),
+            keystore_path: None,
+        };
+        let mut app = App::new(data);
+        // Main only (depth 0)
+        assert_eq!(depth_prefix(&app), "");
+        // Push one inspector (depth 1)
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        assert_eq!(depth_prefix(&app), ">");
+        // Push two more (depth 3)
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        app.push_view(View::Inspector(InspectTarget::Object(addr)));
+        assert_eq!(depth_prefix(&app), ">>>");
     }
 }
