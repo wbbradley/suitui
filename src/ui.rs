@@ -828,6 +828,7 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let width = 50u16.min(area.width.saturating_sub(4));
     let height = (state.balances.len() as u16 + 4 + TRANSFER_HEADER_LINES)
+        .max(1)
         .min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
@@ -844,6 +845,37 @@ fn draw_transfer_select_coin(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, modal_area);
 
     render_transfer_header(frame, state, inner);
+
+    if state.balances.is_empty() {
+        let msg = match app.coin_state {
+            CoinState::Loading => "Loading coin balances...",
+            CoinState::Error(_) => "Error loading coins. Press Esc to close.",
+            _ => "Loading...",
+        };
+        let content_top = inner.y + TRANSFER_HEADER_LINES;
+        let msg_area = Rect::new(
+            inner.x,
+            content_top,
+            inner.width,
+            inner
+                .height
+                .saturating_sub(TRANSFER_HEADER_LINES)
+                .saturating_sub(1),
+        );
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            msg_area,
+        );
+        let help = Paragraph::new("Esc: Cancel").style(Style::default().fg(Color::DarkGray));
+        let help_area = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        );
+        frame.render_widget(help, help_area);
+        return;
+    }
 
     let items: Vec<ListItem> = state
         .balances

@@ -890,6 +890,18 @@ impl App {
                 Ok(balances) => self.coin_state = CoinState::Loaded(balances),
                 Err(msg) => self.coin_state = CoinState::Error(msg),
             }
+            if let Some(ref mut ts) = self.transfer_state
+                && ts.step == TransferStep::SelectCoin
+                && let CoinState::Loaded(ref balances) = self.coin_state
+            {
+                let old_len = ts.balances.len();
+                ts.balances = balances.clone();
+                if ts.balances.is_empty() {
+                    ts.coin_list_state.select(None);
+                } else if old_len != ts.balances.len() || ts.coin_list_state.selected().is_none() {
+                    ts.coin_list_state.select(Some(0));
+                }
+            }
         }
     }
 
@@ -1147,8 +1159,8 @@ impl App {
         self.key_for_address(&addr)
             .ok_or("no signing key for this address")?;
         let balances = match &self.coin_state {
-            CoinState::Loaded(b) if !b.is_empty() => b.clone(),
-            _ => return Err("no coins loaded for this address"),
+            CoinState::Loaded(b) => b.clone(),
+            _ => vec![],
         };
         let sender_alias = self
             .accounts
@@ -1164,7 +1176,9 @@ impl App {
             self.active_env.clone().unwrap_or_else(|| "unknown".into())
         };
         let mut coin_list_state = ListState::default();
-        coin_list_state.select(Some(0));
+        if !balances.is_empty() {
+            coin_list_state.select(Some(0));
+        }
         let mut recipient_list_state = ListState::default();
         recipient_list_state.select(Some(0));
         self.transfer_state = Some(TransferState {
@@ -1188,6 +1202,8 @@ impl App {
             spendable_state: SpendableState::Idle,
             spendable_coin_type: None,
         });
+        self.force_refresh_coins();
+        self.maybe_trigger_coin_fetch();
         Ok(())
     }
 
@@ -1236,6 +1252,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(state) = &mut self.transfer_state
                     && state.coin_list_state.selected().is_some()
+                    && !state.balances.is_empty()
                 {
                     state.step = TransferStep::SelectRecipient;
                 }
@@ -1459,9 +1476,10 @@ impl App {
         let recipient = state.recipient;
         self.invalidate_address_caches(sender);
         if let Some(recipient) = recipient
-            && self.accounts.iter().any(|(addr, _)| *addr == recipient) {
-                self.invalidate_address_caches(recipient);
-            }
+            && self.accounts.iter().any(|(addr, _)| *addr == recipient)
+        {
+            self.invalidate_address_caches(recipient);
+        }
         self.coin_displayed_key = None;
     }
 
@@ -2664,8 +2682,8 @@ mod tests {
         (app, addrs)
     }
 
-    #[test]
-    fn s_opens_transfer_modal() {
+    #[tokio::test]
+    async fn s_opens_transfer_modal() {
         let (mut app, addrs) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         assert!(app.transfer_state.is_some());
@@ -2679,16 +2697,63 @@ mod tests {
         assert!(!state.is_mainnet);
     }
 
-    #[test]
-    fn s_guard_no_coins() {
+    #[tokio::test]
+    async fn s_opens_transfer_even_without_coins() {
         let (mut app, _) = test_app();
         app.keystore = vec![KeyEntry::test_entry(
             Address::from_bytes([2u8; 32]).unwrap(),
         )];
         // coin_state is Idle by default
         app.handle_key(key(KeyCode::Char('s')));
-        assert!(app.transfer_state.is_none());
-        assert!(app.transfer_error_flash.is_some());
+        assert!(app.transfer_state.is_some());
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.balances.is_empty());
+        assert_eq!(state.coin_list_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn open_transfer_clears_coin_cache() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        let coin_key = (addrs[1], "https://testnet.example.com".to_string());
+        app.coin_cache.insert(
+            coin_key.clone(),
+            CoinCacheEntry {
+                balances: vec![],
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        assert!(app.coin_cache.contains_key(&coin_key));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_some());
+        assert!(!app.coin_cache.contains_key(&coin_key));
+    }
+
+    #[tokio::test]
+    async fn coin_result_updates_transfer_balances() {
+        let (mut app, addrs) = test_app();
+        app.keystore = vec![KeyEntry::test_entry(addrs[1])];
+        // Open transfer with no coins
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.transfer_state.is_some());
+        assert!(app.transfer_state.as_ref().unwrap().balances.is_empty());
+
+        // Simulate coin fetch result arriving
+        let rpc = "https://testnet.example.com".to_string();
+        app.coin_displayed_key = Some((addrs[1], rpc.clone()));
+        app.handle_coin_result(CoinFetchResult {
+            address: addrs[1],
+            rpc_url: rpc,
+            outcome: Ok(vec![CoinBalance {
+                coin_type: "0x2::sui::SUI".into(),
+                total_balance: 1_000_000_000,
+                decimals: 9,
+            }]),
+        });
+
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.balances.len(), 1);
+        assert_eq!(state.coin_list_state.selected(), Some(0));
     }
 
     #[test]
@@ -2705,8 +2770,8 @@ mod tests {
         assert!(app.transfer_error_flash.is_some());
     }
 
-    #[test]
-    fn transfer_select_coin_esc_closes() {
+    #[tokio::test]
+    async fn transfer_select_coin_esc_closes() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         assert!(app.transfer_state.is_some());
@@ -2714,8 +2779,8 @@ mod tests {
         assert!(app.transfer_state.is_none());
     }
 
-    #[test]
-    fn transfer_select_coin_navigate() {
+    #[tokio::test]
+    async fn transfer_select_coin_navigate() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         assert_eq!(
@@ -2746,8 +2811,8 @@ mod tests {
         ); // clamps at end
     }
 
-    #[test]
-    fn transfer_select_coin_enter_advances() {
+    #[tokio::test]
+    async fn transfer_select_coin_enter_advances() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter));
@@ -2766,8 +2831,8 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
     }
 
-    #[test]
-    fn transfer_recipient_typing() {
+    #[tokio::test]
+    async fn transfer_recipient_typing() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -2793,8 +2858,8 @@ mod tests {
         assert!(state.recipient.is_some());
     }
 
-    #[test]
-    fn transfer_recipient_invalid_shows_error() {
+    #[tokio::test]
+    async fn transfer_recipient_invalid_shows_error() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3104,8 +3169,8 @@ mod tests {
         assert_eq!(app.resolve_chain_id(), "unknown");
     }
 
-    #[test]
-    fn transfer_mainnet_detection() {
+    #[tokio::test]
+    async fn transfer_mainnet_detection() {
         let (mut app, addrs) = app_with_coins_and_key();
         // Set env chain_id to a mainnet prefix
         app.envs[1].chain_id = Some("35834a8a1234".into());
@@ -3136,8 +3201,8 @@ mod tests {
         assert_eq!(state.amount_input, "1");
     }
 
-    #[test]
-    fn recipient_list_navigate() {
+    #[tokio::test]
+    async fn recipient_list_navigate() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin → recipient list
@@ -3198,8 +3263,8 @@ mod tests {
         assert_eq!(state.recipient, Some(addrs[0]));
     }
 
-    #[test]
-    fn recipient_enter_external_mode() {
+    #[tokio::test]
+    async fn recipient_enter_external_mode() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3209,8 +3274,8 @@ mod tests {
         assert!(state.recipient_external_mode);
     }
 
-    #[test]
-    fn recipient_external_esc_returns_to_list() {
+    #[tokio::test]
+    async fn recipient_external_esc_returns_to_list() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3257,8 +3322,8 @@ mod tests {
         assert_eq!(app.current_view(), View::TransactionHistory(addrs[2]));
     }
 
-    #[test]
-    fn s_uses_active_address() {
+    #[tokio::test]
+    async fn s_uses_active_address() {
         let (mut app, addrs) = test_app();
         // Give bob (addrs[1], active_address) a key and coins
         app.keystore = vec![KeyEntry::test_entry(addrs[1])];
