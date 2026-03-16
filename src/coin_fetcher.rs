@@ -1,9 +1,16 @@
 use std::collections::HashMap;
 
 use futures::StreamExt;
+use prost_types::FieldMask;
 use sui_rpc::{
     Client,
-    proto::sui::rpc::v2::{GetCoinInfoRequest, GetServiceInfoRequest, ListBalancesRequest},
+    field::FieldMaskUtil,
+    proto::sui::rpc::v2::{
+        GetCoinInfoRequest,
+        GetServiceInfoRequest,
+        ListBalancesRequest,
+        ListOwnedObjectsRequest,
+    },
 };
 use sui_sdk_types::Address;
 use tokio::sync::mpsc;
@@ -133,6 +140,67 @@ async fn fetch_chain_id(rpc_url: &str) -> Result<String, String> {
     resp.into_inner()
         .chain_id
         .ok_or_else(|| "chain_id not returned".into())
+}
+
+const MAX_SPENDABLE_COINS: usize = 500;
+
+pub struct SpendableInfo {
+    pub spendable: u64,
+    pub coin_count: usize,
+    pub total_coin_count: usize,
+}
+
+pub struct SpendableFetchResult {
+    pub coin_type: String,
+    pub outcome: Result<SpendableInfo, String>,
+}
+
+pub fn spawn_spendable_fetch(
+    address: Address,
+    coin_type: String,
+    rpc_url: String,
+    tx: mpsc::UnboundedSender<SpendableFetchResult>,
+) {
+    let coin_type_clone = coin_type.clone();
+    tokio::spawn(async move {
+        let outcome = fetch_spendable(&address, &coin_type_clone, &rpc_url).await;
+        let _ = tx.send(SpendableFetchResult { coin_type, outcome });
+    });
+}
+
+async fn fetch_spendable(
+    address: &Address,
+    coin_type: &str,
+    rpc_url: &str,
+) -> Result<SpendableInfo, String> {
+    let client = Client::new(rpc_url).map_err(|e| e.to_string())?;
+    let request = ListOwnedObjectsRequest::const_default()
+        .with_owner(address.to_string())
+        .with_object_type(format!("0x2::coin::Coin<{coin_type}>"))
+        .with_page_size(500)
+        .with_read_mask(FieldMask::from_str("balance"));
+
+    let stream = client.list_owned_objects(request);
+    futures::pin_mut!(stream);
+
+    let mut spendable: u64 = 0;
+    let mut coin_count: usize = 0;
+    let mut total_coin_count: usize = 0;
+
+    while let Some(result) = stream.next().await {
+        let obj = result.map_err(|e| e.to_string())?;
+        total_coin_count += 1;
+        if coin_count < MAX_SPENDABLE_COINS {
+            spendable += obj.balance_opt().unwrap_or(0);
+            coin_count += 1;
+        }
+    }
+
+    Ok(SpendableInfo {
+        spendable,
+        coin_count,
+        total_coin_count,
+    })
 }
 
 pub fn spawn_fetch(address: Address, rpc_url: String, tx: mpsc::UnboundedSender<CoinFetchResult>) {

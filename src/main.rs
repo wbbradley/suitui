@@ -103,6 +103,9 @@ fn run_event_loop(
         while let Ok(result) = app.tx_detail_rx.try_recv() {
             app.handle_tx_detail_result(result);
         }
+        while let Ok(result) = app.spendable_rx.try_recv() {
+            app.handle_spendable_result(result);
+        }
 
         app.maybe_trigger_coin_fetch();
         app.maybe_trigger_chain_id_fetch();

@@ -17,6 +17,7 @@ use crate::{
         Focus,
         InspectTarget,
         ObjectState,
+        SpendableState,
         TransferState,
         TransferStep,
         TxDetailState,
@@ -1020,19 +1021,54 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
     let content_top = inner.y + TRANSFER_HEADER_LINES;
 
     let selected_idx = state.coin_list_state.selected().unwrap_or(0);
-    let (coin_label, available) = state
+    let coin_label = state
         .balances
         .get(selected_idx)
-        .map(|b| {
-            (
-                short_coin_type(&b.coin_type).to_string(),
-                format_balance(b.total_balance, b.decimals),
-            )
-        })
-        .unwrap_or(("?".into(), "?".into()));
+        .map(|b| short_coin_type(&b.coin_type).to_string())
+        .unwrap_or_else(|| "?".into());
 
-    let context_line = format!("{coin_label} — Available: {available}");
-    let context = Paragraph::new(context_line).style(Style::default().fg(Color::Gray));
+    let (available_text, available_style) = match &state.spendable_state {
+        SpendableState::Loading => (
+            "loading...".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        SpendableState::Loaded {
+            spendable,
+            coin_count,
+            total_coin_count,
+        } => {
+            let decimals = state
+                .balances
+                .get(selected_idx)
+                .map(|b| b.decimals)
+                .unwrap_or(9);
+            let formatted = format_balance(*spendable, decimals);
+            let coin_info = if total_coin_count > coin_count {
+                format!("{formatted} ({coin_count} of {total_coin_count} coins)")
+            } else {
+                format!("{formatted} ({coin_count} coins)")
+            };
+            (coin_info, Style::default())
+        }
+        SpendableState::Error(e) => (e.clone(), Style::default().fg(Color::Red)),
+        SpendableState::Idle => {
+            let available = state
+                .balances
+                .get(selected_idx)
+                .map(|b| format_balance(b.total_balance, b.decimals))
+                .unwrap_or_else(|| "?".into());
+            (available, Style::default())
+        }
+    };
+
+    let context_line = Line::from(vec![
+        Span::styled(
+            format!("{coin_label} \u{2014} Available: "),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(available_text, available_style),
+    ]);
+    let context = Paragraph::new(context_line);
     let context_area = Rect::new(inner.x, content_top, inner.width, 1);
     frame.render_widget(context, context_area);
 

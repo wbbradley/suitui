@@ -52,7 +52,7 @@ struct TxDetailCacheEntry {
 
 use crate::{
     address_fetcher::{self, AddressData, AddressFetchResult},
-    coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult},
+    coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult, SpendableFetchResult},
     config::{Env, WalletData},
     keystore::KeyEntry,
     object_fetcher::{
@@ -102,6 +102,8 @@ pub struct TransferState {
     pub amount_error: Option<String>,
     pub amount_raw: Option<u64>,
     pub result: Option<TransferResult>,
+    pub spendable_state: SpendableState,
+    pub spendable_coin_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +162,18 @@ pub enum TxDetailState {
     Idle,
     Loading,
     Loaded(TransactionDetail),
+    Error(String),
+}
+
+#[derive(Debug)]
+pub enum SpendableState {
+    Idle,
+    Loading,
+    Loaded {
+        spendable: u64,
+        coin_count: usize,
+        total_coin_count: usize,
+    },
     Error(String),
 }
 
@@ -250,6 +264,9 @@ pub struct App {
     transfer_exec_tx: mpsc::UnboundedSender<TransferExecuteResult>,
     pub transfer_exec_rx: mpsc::UnboundedReceiver<TransferExecuteResult>,
 
+    spendable_tx: mpsc::UnboundedSender<SpendableFetchResult>,
+    pub spendable_rx: mpsc::UnboundedReceiver<SpendableFetchResult>,
+
     pub last_viewport_height: u16,
 
     pub tx_detail_state: TxDetailState,
@@ -300,6 +317,7 @@ impl App {
         let (tx_history_tx, tx_history_rx) = mpsc::unbounded_channel();
         let (address_fetch_tx, address_fetch_rx) = mpsc::unbounded_channel();
         let (transfer_exec_tx, transfer_exec_rx) = mpsc::unbounded_channel();
+        let (spendable_tx, spendable_rx) = mpsc::unbounded_channel();
         let (tx_detail_tx, tx_detail_rx) = mpsc::unbounded_channel();
 
         App {
@@ -358,6 +376,8 @@ impl App {
             transfer_error_flash: None,
             transfer_exec_tx,
             transfer_exec_rx,
+            spendable_tx,
+            spendable_rx,
             last_viewport_height: 0,
             tx_detail_state: TxDetailState::Idle,
             tx_detail_cache: HashMap::new(),
@@ -1158,6 +1178,8 @@ impl App {
             amount_error: None,
             amount_raw: None,
             result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         Ok(())
     }
@@ -1220,37 +1242,33 @@ impl App {
         let Some(state) = &mut self.transfer_state else {
             return AppAction::None;
         };
+        let mut entered_amount = false;
         if state.recipient_external_mode {
             match key.code {
                 KeyCode::Esc => {
                     state.recipient_external_mode = false;
                     state.recipient_error = None;
-                    AppAction::Redraw
                 }
-                KeyCode::Enter => {
-                    match state.recipient_input.parse::<Address>() {
-                        Ok(addr) => {
-                            state.recipient = Some(addr);
-                            state.recipient_error = None;
-                            state.step = TransferStep::EnterAmount;
-                        }
-                        Err(e) => {
-                            state.recipient_error = Some(e.to_string());
-                        }
+                KeyCode::Enter => match state.recipient_input.parse::<Address>() {
+                    Ok(addr) => {
+                        state.recipient = Some(addr);
+                        state.recipient_error = None;
+                        state.step = TransferStep::EnterAmount;
+                        entered_amount = true;
                     }
-                    AppAction::Redraw
-                }
+                    Err(e) => {
+                        state.recipient_error = Some(e.to_string());
+                    }
+                },
                 KeyCode::Backspace => {
                     state.recipient_input.pop();
                     state.recipient_error = None;
-                    AppAction::Redraw
                 }
                 KeyCode::Char(c) => {
                     state.recipient_input.push(c);
                     state.recipient_error = None;
-                    AppAction::Redraw
                 }
-                _ => AppAction::None,
+                _ => return AppAction::None,
             }
         } else {
             let item_count = self.accounts.len() + 1;
@@ -1261,19 +1279,16 @@ impl App {
                 KeyCode::Esc => {
                     state.step = TransferStep::SelectCoin;
                     state.recipient_error = None;
-                    AppAction::Redraw
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     let current = state.recipient_list_state.selected().unwrap_or(0) as i32;
                     let next = (current - 1).clamp(0, item_count as i32 - 1) as usize;
                     state.recipient_list_state.select(Some(next));
-                    AppAction::Redraw
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let current = state.recipient_list_state.selected().unwrap_or(0) as i32;
                     let next = (current + 1).clamp(0, item_count as i32 - 1) as usize;
                     state.recipient_list_state.select(Some(next));
-                    AppAction::Redraw
                 }
                 KeyCode::Enter => {
                     let selected = state.recipient_list_state.selected().unwrap_or(0);
@@ -1283,14 +1298,18 @@ impl App {
                         state.recipient = Some(addr);
                         state.recipient_error = None;
                         state.step = TransferStep::EnterAmount;
+                        entered_amount = true;
                     } else {
                         state.recipient_external_mode = true;
                     }
-                    AppAction::Redraw
                 }
-                _ => AppAction::None,
+                _ => return AppAction::None,
             }
         }
+        if entered_amount {
+            self.trigger_spendable_fetch();
+        }
+        AppAction::Redraw
     }
 
     fn handle_transfer_amount(&mut self, key: KeyEvent) -> AppAction {
@@ -1312,11 +1331,14 @@ impl App {
                         .unwrap_or(9);
                     match coin_fetcher::parse_amount(&state.amount_input, decimals) {
                         Ok(raw) => {
-                            let available = state
-                                .balances
-                                .get(selected_idx)
-                                .map(|b| b.total_balance)
-                                .unwrap_or(0);
+                            let available = match &state.spendable_state {
+                                SpendableState::Loaded { spendable, .. } => *spendable,
+                                _ => state
+                                    .balances
+                                    .get(selected_idx)
+                                    .map(|b| b.total_balance)
+                                    .unwrap_or(0),
+                            };
                             if raw > available {
                                 state.amount_error =
                                     Some("amount exceeds available balance".into());
@@ -1427,6 +1449,53 @@ impl App {
         state.step = TransferStep::Complete;
         // Clear coin cache so balances refresh after transfer
         self.coin_displayed_key = None;
+    }
+
+    fn trigger_spendable_fetch(&mut self) {
+        let Some(env) = self.active_env_info() else {
+            return;
+        };
+        let rpc_url = env.rpc.clone();
+
+        let Some(state) = &mut self.transfer_state else {
+            return;
+        };
+        let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+        let Some(balance) = state.balances.get(selected_idx) else {
+            return;
+        };
+        let coin_type = balance.coin_type.clone();
+
+        // Skip if already loaded/loading for this coin type
+        if state.spendable_coin_type.as_ref() == Some(&coin_type)
+            && !matches!(state.spendable_state, SpendableState::Idle)
+        {
+            return;
+        }
+
+        state.spendable_state = SpendableState::Loading;
+        state.spendable_coin_type = Some(coin_type.clone());
+
+        let sender = state.sender;
+
+        coin_fetcher::spawn_spendable_fetch(sender, coin_type, rpc_url, self.spendable_tx.clone());
+    }
+
+    pub fn handle_spendable_result(&mut self, result: SpendableFetchResult) {
+        let Some(state) = &mut self.transfer_state else {
+            return;
+        };
+        if state.spendable_coin_type.as_ref() != Some(&result.coin_type) {
+            return; // stale result
+        }
+        state.spendable_state = match result.outcome {
+            Ok(info) => SpendableState::Loaded {
+                spendable: info.spendable,
+                coin_count: info.coin_count,
+                total_coin_count: info.total_coin_count,
+            },
+            Err(e) => SpendableState::Error(e),
+        };
     }
 
     fn handle_tx_inspector_key(&mut self, key: KeyEvent) -> AppAction {
@@ -2695,8 +2764,8 @@ mod tests {
         assert_eq!(app.transfer_state.as_ref().unwrap().recipient_input, "0xa");
     }
 
-    #[test]
-    fn transfer_recipient_valid_advances() {
+    #[tokio::test]
+    async fn transfer_recipient_valid_advances() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -2725,8 +2794,8 @@ mod tests {
         assert!(state.recipient_error.is_some());
     }
 
-    #[test]
-    fn transfer_amount_valid_advances() {
+    #[tokio::test]
+    async fn transfer_amount_valid_advances() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
@@ -2742,8 +2811,8 @@ mod tests {
         assert_eq!(state.amount_raw, Some(1_000_000_000));
     }
 
-    #[test]
-    fn transfer_amount_exceeds_balance() {
+    #[tokio::test]
+    async fn transfer_amount_exceeds_balance() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin (SUI, 5 SUI)
@@ -2761,8 +2830,8 @@ mod tests {
         assert!(state.amount_error.is_some());
     }
 
-    #[test]
-    fn transfer_review_esc_goes_back() {
+    #[tokio::test]
+    async fn transfer_review_esc_goes_back() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -2784,8 +2853,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn transfer_review_enter_starts_executing() {
+    #[tokio::test]
+    async fn transfer_review_enter_starts_executing() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -2804,8 +2873,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn transfer_executing_blocks_keys() {
+    #[tokio::test]
+    async fn transfer_executing_blocks_keys() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -2859,6 +2928,8 @@ mod tests {
             result: Some(TransferResult::Success {
                 digest: "test".into(),
             }),
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         app.handle_key(key(KeyCode::Enter));
         assert!(app.transfer_state.is_none());
@@ -2885,6 +2956,8 @@ mod tests {
             amount_error: None,
             amount_raw: None,
             result: Some(TransferResult::Error("fail".into())),
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         app.handle_key(key(KeyCode::Esc));
         assert!(app.transfer_state.is_none());
@@ -2911,6 +2984,8 @@ mod tests {
             amount_error: None,
             amount_raw: None,
             result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         app.handle_transfer_exec_result(TransferExecuteResult {
             result: TransferResult::Success {
@@ -2945,6 +3020,8 @@ mod tests {
             amount_error: None,
             amount_raw: None,
             result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         app.handle_transfer_exec_result(TransferExecuteResult {
             result: TransferResult::Error("boom".into()),
@@ -2977,6 +3054,8 @@ mod tests {
             amount_error: None,
             amount_raw: None,
             result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
         });
         app.handle_transfer_exec_result(TransferExecuteResult {
             result: TransferResult::Success {
@@ -3024,8 +3103,8 @@ mod tests {
         assert_eq!(state.sender, addrs[1]);
     }
 
-    #[test]
-    fn transfer_back_preserves_data() {
+    #[tokio::test]
+    async fn transfer_back_preserves_data() {
         let (mut app, _) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3093,8 +3172,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn recipient_select_known_account() {
+    #[tokio::test]
+    async fn recipient_select_known_account() {
         let (mut app, addrs) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3134,8 +3213,8 @@ mod tests {
         assert_eq!(state.recipient_input, "0x");
     }
 
-    #[test]
-    fn recipient_select_known_account_preserves_on_back() {
+    #[tokio::test]
+    async fn recipient_select_known_account_preserves_on_back() {
         let (mut app, addrs) = app_with_coins_and_key();
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Enter)); // select coin
@@ -3503,5 +3582,92 @@ mod tests {
         assert_eq!(app.tx_detail_cache.len(), 0);
         assert!(app.tx_detail_inflight.is_none());
         assert!(app.tx_detail_displayed_key.is_none());
+    }
+
+    fn transfer_state_at_amount(
+        addrs: &[Address; 3],
+        spendable_state: SpendableState,
+    ) -> TransferState {
+        let mut coin_list_state = ListState::default();
+        coin_list_state.select(Some(0));
+        TransferState {
+            step: TransferStep::EnterAmount,
+            sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
+            balances: vec![CoinBalance {
+                coin_type: "0x2::sui::SUI".into(),
+                total_balance: 5_000_000_000,
+                decimals: 9,
+            }],
+            coin_list_state,
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: Some(addrs[0]),
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+            result: None,
+            spendable_state,
+            spendable_coin_type: Some("0x2::sui::SUI".into()),
+        }
+    }
+
+    #[test]
+    fn transfer_amount_validates_against_spendable() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.transfer_state = Some(transfer_state_at_amount(
+            &addrs,
+            SpendableState::Loaded {
+                spendable: 2_000_000_000,
+                coin_count: 3,
+                total_coin_count: 3,
+            },
+        ));
+        // Type "3" (3 SUI > 2 spendable)
+        app.handle_key(key(KeyCode::Char('3')));
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.amount_error.is_some());
+        assert_eq!(state.step, TransferStep::EnterAmount);
+
+        // Backspace, type "1" (1 SUI <= 2 spendable)
+        app.handle_key(key(KeyCode::Backspace));
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.amount_error.is_none());
+        assert_eq!(state.step, TransferStep::Review);
+    }
+
+    #[test]
+    fn transfer_amount_falls_back_on_idle() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.transfer_state = Some(transfer_state_at_amount(&addrs, SpendableState::Idle));
+        // Type "4" (4 SUI < 5 total_balance)
+        app.handle_key(key(KeyCode::Char('4')));
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.amount_error.is_none());
+        assert_eq!(state.step, TransferStep::Review);
+    }
+
+    #[test]
+    fn transfer_amount_falls_back_on_error() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.transfer_state = Some(transfer_state_at_amount(
+            &addrs,
+            SpendableState::Error("fetch failed".into()),
+        ));
+        // Type "4" (4 SUI < 5 total_balance)
+        app.handle_key(key(KeyCode::Char('4')));
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert!(state.amount_error.is_none());
+        assert_eq!(state.step, TransferStep::Review);
     }
 }
