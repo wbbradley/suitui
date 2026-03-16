@@ -12,6 +12,7 @@ use crate::{
     app::{
         AddressState,
         App,
+        CheckpointState,
         CoinState,
         DynFieldsState,
         Focus,
@@ -42,8 +43,80 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Inspector(InspectTarget::Transaction(ref digest)) => {
             draw_transaction_inspector(frame, app, digest.clone());
         }
+        View::Inspector(InspectTarget::Checkpoint(seq)) => {
+            draw_checkpoint_inspector(frame, app, seq);
+        }
         View::TransactionHistory(addr) => draw_transaction_history(frame, app, addr),
     }
+}
+
+fn draw_checkpoint_inspector(frame: &mut Frame, app: &App, seq: u64) {
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+    let content_area = outer[0];
+    let help_area = outer[1];
+
+    let block = Block::default()
+        .title(format!("Checkpoint: {seq}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &app.checkpoint_state {
+        CheckpointState::Idle | CheckpointState::Loading => {
+            let msg = if matches!(app.checkpoint_state, CheckpointState::Loading) {
+                "Loading checkpoint..."
+            } else {
+                "Waiting..."
+            };
+            let p = Paragraph::new(format!("  {msg}"))
+                .style(Style::default().fg(Color::Yellow))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        CheckpointState::Error(msg) => {
+            let p = Paragraph::new(format!("  Error: {msg}"))
+                .style(Style::default().fg(Color::Red))
+                .block(block);
+            frame.render_widget(p, content_area);
+        }
+        CheckpointState::Loaded(data) => {
+            let mut lines = Vec::new();
+            lines.push(Line::from(vec![
+                Span::styled("  Sequence: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(data.sequence_number.to_string()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Digest:   ", Style::default().fg(Color::DarkGray)),
+                Span::raw(&data.digest),
+            ]));
+            if let Some(epoch) = data.epoch {
+                lines.push(Line::from(vec![
+                    Span::styled("  Epoch:    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(epoch.to_string()),
+                ]));
+            }
+            if let Some(ts) = &data.timestamp {
+                lines.push(Line::from(vec![
+                    Span::styled("  Time:     ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(transaction_fetcher::format_timestamp(ts)),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  Tx Count: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(data.transaction_count.to_string()),
+            ]));
+            if data.is_end_of_epoch {
+                lines.push(Line::from(Span::styled(
+                    "  [End of Epoch]",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+
+            let p = Paragraph::new(lines).block(block);
+            frame.render_widget(p, content_area);
+        }
+    }
+
+    draw_inspector_help_bar(frame, help_area);
 }
 
 fn draw_transaction_inspector(frame: &mut Frame, app: &App, digest: String) {

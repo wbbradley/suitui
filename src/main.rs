@@ -1,5 +1,6 @@
 mod address_fetcher;
 mod app;
+mod checkpoint_fetcher;
 mod coin_fetcher;
 mod config;
 mod keystore;
@@ -103,6 +104,9 @@ fn run_event_loop(
         while let Ok(result) = app.tx_detail_rx.try_recv() {
             app.handle_tx_detail_result(result);
         }
+        while let Ok(result) = app.checkpoint_rx.try_recv() {
+            app.handle_checkpoint_result(result);
+        }
         while let Ok(result) = app.spendable_rx.try_recv() {
             app.handle_spendable_result(result);
         }
@@ -114,6 +118,7 @@ fn run_event_loop(
         app.maybe_trigger_tx_history_fetch();
         app.maybe_trigger_address_fetch();
         app.maybe_trigger_tx_detail_fetch();
+        app.maybe_trigger_checkpoint_fetch();
 
         if app.should_quit {
             break;

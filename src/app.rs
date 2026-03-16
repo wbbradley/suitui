@@ -55,8 +55,15 @@ struct TxDetailCacheEntry {
     fetched_at: Instant,
 }
 
+struct CheckpointCacheEntry {
+    data: CheckpointData,
+    error: Option<String>,
+    fetched_at: Instant,
+}
+
 use crate::{
     address_fetcher::{self, AddressData, AddressFetchResult},
+    checkpoint_fetcher::{self, CheckpointData, CheckpointFetchResult},
     coin_fetcher::{
         self,
         ChainIdResult,
@@ -178,6 +185,13 @@ pub enum TxDetailState {
     Error(String),
 }
 
+pub enum CheckpointState {
+    Idle,
+    Loading,
+    Loaded(CheckpointData),
+    Error(String),
+}
+
 #[derive(Debug)]
 pub enum SpendableState {
     Idle,
@@ -195,6 +209,7 @@ pub enum InspectTarget {
     Object(Address),
     Address(Address),
     Transaction(String),
+    Checkpoint(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +303,13 @@ pub struct App {
     tx_detail_displayed_key: Option<(String, String)>,
     tx_detail_tx: mpsc::UnboundedSender<TxDetailFetchResult>,
     pub tx_detail_rx: mpsc::UnboundedReceiver<TxDetailFetchResult>,
+
+    pub checkpoint_state: CheckpointState,
+    checkpoint_cache: HashMap<(u64, String), CheckpointCacheEntry>,
+    checkpoint_inflight: Option<(u64, String)>,
+    checkpoint_displayed_key: Option<(u64, String)>,
+    checkpoint_tx: mpsc::UnboundedSender<CheckpointFetchResult>,
+    pub checkpoint_rx: mpsc::UnboundedReceiver<CheckpointFetchResult>,
 }
 
 impl App {
@@ -332,6 +354,7 @@ impl App {
         let (transfer_exec_tx, transfer_exec_rx) = mpsc::unbounded_channel();
         let (spendable_tx, spendable_rx) = mpsc::unbounded_channel();
         let (tx_detail_tx, tx_detail_rx) = mpsc::unbounded_channel();
+        let (checkpoint_tx, checkpoint_rx) = mpsc::unbounded_channel();
 
         App {
             view_stack: vec![View::Main],
@@ -398,6 +421,12 @@ impl App {
             tx_detail_displayed_key: None,
             tx_detail_tx,
             tx_detail_rx,
+            checkpoint_state: CheckpointState::Idle,
+            checkpoint_cache: HashMap::new(),
+            checkpoint_inflight: None,
+            checkpoint_displayed_key: None,
+            checkpoint_tx,
+            checkpoint_rx,
         }
     }
 
@@ -451,6 +480,7 @@ impl App {
             View::Inspector(InspectTarget::Object(_)) => self.object_inspector_links(),
             View::Inspector(InspectTarget::Address(_)) => self.address_inspector_links(),
             View::Inspector(InspectTarget::Transaction(_)) => self.tx_inspector_links(),
+            View::Inspector(InspectTarget::Checkpoint(_)) => vec![],
             _ => Vec::new(),
         }
     }
@@ -541,6 +571,9 @@ impl App {
             View::Inspector(InspectTarget::Object(_)) => self.handle_object_inspector_key(key),
             View::Inspector(InspectTarget::Address(_)) => self.handle_address_inspector_key(key),
             View::Inspector(InspectTarget::Transaction(_)) => self.handle_tx_inspector_key(key),
+            View::Inspector(InspectTarget::Checkpoint(_)) => {
+                self.handle_checkpoint_inspector_key(key)
+            }
             View::TransactionHistory(_) => self.handle_tx_history_key(key),
         }
     }
@@ -1671,6 +1704,77 @@ impl App {
             match result.outcome {
                 Ok(data) => self.tx_detail_state = TxDetailState::Loaded(data),
                 Err(msg) => self.tx_detail_state = TxDetailState::Error(msg),
+            }
+        }
+    }
+
+    fn handle_checkpoint_inspector_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pop_view();
+                AppAction::Redraw
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    pub fn maybe_trigger_checkpoint_fetch(&mut self) {
+        let View::Inspector(InspectTarget::Checkpoint(seq)) = self.current_view() else {
+            return;
+        };
+        let Some(env) = self.active_env_info() else {
+            self.checkpoint_state = CheckpointState::Idle;
+            self.checkpoint_displayed_key = None;
+            return;
+        };
+        let key = (seq, env.rpc.clone());
+        if self.checkpoint_displayed_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(entry) = self.checkpoint_cache.get(&key)
+            && entry.fetched_at.elapsed() < OBJECT_CACHE_TTL
+        {
+            self.checkpoint_state = if let Some(msg) = &entry.error {
+                CheckpointState::Error(msg.clone())
+            } else {
+                CheckpointState::Loaded(entry.data.clone())
+            };
+            self.checkpoint_displayed_key = Some(key);
+            return;
+        }
+        if self.checkpoint_inflight.as_ref() == Some(&key) {
+            self.checkpoint_state = CheckpointState::Loading;
+            self.checkpoint_displayed_key = Some(key);
+            return;
+        }
+        self.checkpoint_inflight = Some(key.clone());
+        self.checkpoint_displayed_key = Some(key.clone());
+        self.checkpoint_state = CheckpointState::Loading;
+        checkpoint_fetcher::spawn_checkpoint_fetch(key.0, key.1, self.checkpoint_tx.clone());
+    }
+
+    pub fn handle_checkpoint_result(&mut self, result: CheckpointFetchResult) {
+        let key = (result.sequence_number, result.rpc_url);
+        if self.checkpoint_inflight.as_ref() == Some(&key) {
+            self.checkpoint_inflight = None;
+        }
+        let entry = match &result.outcome {
+            Ok(data) => CheckpointCacheEntry {
+                data: data.clone(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(msg) => CheckpointCacheEntry {
+                data: CheckpointData::empty(),
+                error: Some(msg.clone()),
+                fetched_at: Instant::now(),
+            },
+        };
+        self.checkpoint_cache.insert(key.clone(), entry);
+        if self.checkpoint_displayed_key.as_ref() == Some(&key) {
+            match result.outcome {
+                Ok(data) => self.checkpoint_state = CheckpointState::Loaded(data),
+                Err(msg) => self.checkpoint_state = CheckpointState::Error(msg),
             }
         }
     }
@@ -4060,5 +4164,89 @@ mod tests {
                 .unwrap()
                 .contains("insufficient balance for gas")
         );
+    }
+
+    #[test]
+    fn checkpoint_inspector_esc_pops_back() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        assert_eq!(app.view_stack.len(), 2);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view_stack.len(), 1);
+        assert_eq!(app.current_view(), View::Main);
+    }
+
+    #[test]
+    fn checkpoint_inspector_q_pops_back() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(100)));
+        app.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(app.view_stack.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fetch_triggered_on_inspector_view() {
+        let (mut app, _) = test_app();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        app.maybe_trigger_checkpoint_fetch();
+        assert!(matches!(app.checkpoint_state, CheckpointState::Loading));
+        assert!(app.checkpoint_inflight.is_some());
+    }
+
+    #[test]
+    fn checkpoint_fetch_cache_hit() {
+        let (mut app, _) = test_app();
+        let rpc = app.active_env_info().unwrap().rpc.clone();
+        app.checkpoint_cache.insert(
+            (42u64, rpc),
+            CheckpointCacheEntry {
+                data: CheckpointData::empty(),
+                error: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        app.maybe_trigger_checkpoint_fetch();
+        assert!(matches!(app.checkpoint_state, CheckpointState::Loaded(_)));
+        assert!(app.checkpoint_inflight.is_none());
+    }
+
+    #[test]
+    fn checkpoint_handle_result_updates_state() {
+        let (mut app, _) = test_app();
+        let rpc = "https://testnet.example.com".to_string();
+        app.push_view(View::Inspector(InspectTarget::Checkpoint(42)));
+        app.checkpoint_inflight = Some((42, rpc.clone()));
+        app.checkpoint_displayed_key = Some((42, rpc.clone()));
+        app.checkpoint_state = CheckpointState::Loading;
+
+        let mut data = CheckpointData::empty();
+        data.sequence_number = 42;
+        data.digest = "test_digest".into();
+        app.handle_checkpoint_result(CheckpointFetchResult {
+            sequence_number: 42,
+            rpc_url: rpc,
+            outcome: Ok(data),
+        });
+        assert!(matches!(app.checkpoint_state, CheckpointState::Loaded(_)));
+        if let CheckpointState::Loaded(d) = &app.checkpoint_state {
+            assert_eq!(d.sequence_number, 42);
+            assert_eq!(d.digest, "test_digest");
+        }
+    }
+
+    #[test]
+    fn checkpoint_handle_error_result() {
+        let (mut app, _) = test_app();
+        let rpc = "https://testnet.example.com".to_string();
+        app.checkpoint_displayed_key = Some((99, rpc.clone()));
+        app.checkpoint_state = CheckpointState::Loading;
+
+        app.handle_checkpoint_result(CheckpointFetchResult {
+            sequence_number: 99,
+            rpc_url: rpc,
+            outcome: Err("not found".into()),
+        });
+        assert!(matches!(app.checkpoint_state, CheckpointState::Error(_)));
     }
 }
