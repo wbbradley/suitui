@@ -11,6 +11,11 @@ use tokio::sync::mpsc;
 
 const SUI_MAINNET_CHAIN_ID_PREFIX: &str = "35834a8a";
 const COIN_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Conservative gas reserve for SUI transfers (0.05 SUI).
+/// Actual gas cost for a simple transfer is ~0.003-0.005 SUI.
+/// The difference stays with the sender.
+pub(crate) const GAS_BUDGET_RESERVE: u64 = 50_000_000;
 const OBJECT_CACHE_TTL: Duration = Duration::from_secs(300);
 const TX_HISTORY_CACHE_TTL: Duration = Duration::from_secs(300);
 
@@ -52,7 +57,15 @@ struct TxDetailCacheEntry {
 
 use crate::{
     address_fetcher::{self, AddressData, AddressFetchResult},
-    coin_fetcher::{self, ChainIdResult, CoinBalance, CoinFetchResult, SpendableFetchResult},
+    coin_fetcher::{
+        self,
+        ChainIdResult,
+        CoinBalance,
+        CoinFetchResult,
+        SUI_DECIMALS,
+        SpendableFetchResult,
+        format_balance,
+    },
     config::{Env, WalletData},
     keystore::KeyEntry,
     object_fetcher::{
@@ -1363,9 +1376,27 @@ impl App {
                                     .map(|b| b.total_balance)
                                     .unwrap_or(0),
                             };
-                            if raw > available {
-                                state.amount_error =
-                                    Some("amount exceeds available balance".into());
+                            let is_sui = state
+                                .balances
+                                .get(selected_idx)
+                                .map(|b| b.coin_type.ends_with("::SUI"))
+                                .unwrap_or(false);
+                            let sendable = if is_sui {
+                                available.saturating_sub(GAS_BUDGET_RESERVE)
+                            } else {
+                                available
+                            };
+                            if sendable == 0 && is_sui {
+                                state.amount_error = Some("insufficient balance for gas".into());
+                            } else if raw > sendable {
+                                state.amount_error = Some(if is_sui {
+                                    format!(
+                                        "amount exceeds sendable balance ({} reserved for gas)",
+                                        format_balance(GAS_BUDGET_RESERVE, SUI_DECIMALS)
+                                    )
+                                } else {
+                                    "amount exceeds available balance".into()
+                                });
                             } else {
                                 state.amount_raw = Some(raw);
                                 state.amount_error = None;
@@ -3876,5 +3907,117 @@ mod tests {
         assert!(!app.coin_cache.contains_key(&(sender, rpc.clone())));
         // External recipient NOT evicted
         assert!(app.coin_cache.contains_key(&(external, rpc.clone())));
+    }
+
+    fn transfer_state_at_amount_with_coin(
+        addrs: &[Address; 3],
+        coin_type: &str,
+        total_balance: u64,
+        decimals: u32,
+        spendable_state: SpendableState,
+    ) -> TransferState {
+        let mut coin_list_state = ListState::default();
+        coin_list_state.select(Some(0));
+        TransferState {
+            step: TransferStep::EnterAmount,
+            sender: addrs[1],
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
+            balances: vec![CoinBalance {
+                coin_type: coin_type.into(),
+                total_balance,
+                decimals,
+            }],
+            coin_list_state,
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: Some(addrs[0]),
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+            result: None,
+            spendable_state,
+            spendable_coin_type: Some(coin_type.into()),
+        }
+    }
+
+    #[test]
+    fn transfer_sui_gas_reserve_caps_amount() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.transfer_state = Some(transfer_state_at_amount_with_coin(
+            &addrs,
+            "0x2::sui::SUI",
+            5_000_000_000,
+            9,
+            SpendableState::Idle,
+        ));
+        // Try to send 5 SUI (== total balance) — should fail due to gas reserve
+        for c in "5".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert!(state.amount_error.as_ref().unwrap().contains("gas"));
+
+        // Send 4.95 SUI (== 5 - 0.05 reserve) — should succeed
+        app.handle_key(key(KeyCode::Backspace));
+        for c in "4.95".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::Review);
+        assert!(state.amount_error.is_none());
+    }
+
+    #[test]
+    fn transfer_non_sui_no_gas_reserve() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        app.transfer_state = Some(transfer_state_at_amount_with_coin(
+            &addrs,
+            "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC",
+            100_000_000,
+            6,
+            SpendableState::Idle,
+        ));
+        // Send full balance (100 USDC) — should succeed (no gas reserve for non-SUI)
+        for c in "100".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::Review);
+        assert!(state.amount_error.is_none());
+    }
+
+    #[test]
+    fn transfer_sui_insufficient_for_gas() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        // Balance is 0.04 SUI (< 0.05 GAS_BUDGET_RESERVE)
+        app.transfer_state = Some(transfer_state_at_amount_with_coin(
+            &addrs,
+            "0x2::sui::SUI",
+            40_000_000,
+            9,
+            SpendableState::Idle,
+        ));
+        for c in "0.01".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let state = app.transfer_state.as_ref().unwrap();
+        assert_eq!(state.step, TransferStep::EnterAmount);
+        assert!(
+            state
+                .amount_error
+                .as_ref()
+                .unwrap()
+                .contains("insufficient balance for gas")
+        );
     }
 }

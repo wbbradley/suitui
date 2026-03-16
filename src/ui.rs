@@ -15,6 +15,7 @@ use crate::{
         CoinState,
         DynFieldsState,
         Focus,
+        GAS_BUDGET_RESERVE,
         InspectTarget,
         ObjectState,
         SpendableState,
@@ -1032,8 +1033,16 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(state) = &app.transfer_state else {
         return;
     };
+    let selected_idx = state.coin_list_state.selected().unwrap_or(0);
+    let is_sui = state
+        .balances
+        .get(selected_idx)
+        .map(|b| b.coin_type.ends_with("::SUI"))
+        .unwrap_or(false);
+
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 8u16 + TRANSFER_HEADER_LINES;
+    let gas_line: u16 = if is_sui { 1 } else { 0 };
+    let height = 8u16 + gas_line + TRANSFER_HEADER_LINES;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -1052,7 +1061,6 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let content_top = inner.y + TRANSFER_HEADER_LINES;
 
-    let selected_idx = state.coin_list_state.selected().unwrap_or(0);
     let coin_label = state
         .balances
         .get(selected_idx)
@@ -1104,14 +1112,27 @@ fn draw_transfer_amount(frame: &mut Frame, app: &mut App, area: Rect) {
     let context_area = Rect::new(inner.x, content_top, inner.width, 1);
     frame.render_widget(context, context_area);
 
+    if is_sui {
+        let gas_note = Line::from(Span::styled(
+            format!(
+                "  {} reserved for gas",
+                format_balance(GAS_BUDGET_RESERVE, SUI_DECIMALS)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
+        let gas_area = Rect::new(inner.x, content_top + 1, inner.width, 1);
+        frame.render_widget(Paragraph::new(gas_note), gas_area);
+    }
+
+    let offset = gas_line;
     let input_line = format!("{}█", &state.amount_input);
     let input = Paragraph::new(input_line);
-    let input_area = Rect::new(inner.x, content_top + 2, inner.width, 1);
+    let input_area = Rect::new(inner.x, content_top + 2 + offset, inner.width, 1);
     frame.render_widget(input, input_area);
 
     if let Some(err) = &state.amount_error {
         let err_line = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
-        let err_area = Rect::new(inner.x, content_top + 3, inner.width, 1);
+        let err_area = Rect::new(inner.x, content_top + 3 + offset, inner.width, 1);
         frame.render_widget(err_line, err_area);
     }
 
@@ -1131,7 +1152,7 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let width = 60u16.min(area.width.saturating_sub(4));
     let disclaimer_lines: u16 = if state.is_mainnet { 7 } else { 0 };
-    let height = 9u16 + TRANSFER_HEADER_LINES + disclaimer_lines;
+    let height = 10u16 + TRANSFER_HEADER_LINES + disclaimer_lines;
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let modal_area = Rect::new(x, y, width, height);
@@ -1185,10 +1206,20 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("Amount: ", label_style),
             Span::raw(amount),
         ]),
+        Line::from(vec![
+            Span::styled("Gas:    ", label_style),
+            Span::styled(
+                format!(
+                    "~{} SUI (max)",
+                    format_balance(GAS_BUDGET_RESERVE, SUI_DECIMALS)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ];
 
     let summary = Paragraph::new(lines);
-    let summary_area = Rect::new(inner.x, content_top, inner.width, 3);
+    let summary_area = Rect::new(inner.x, content_top, inner.width, 4);
     frame.render_widget(summary, summary_area);
 
     if state.is_mainnet {
@@ -1215,7 +1246,7 @@ fn draw_transfer_review(frame: &mut Frame, app: &mut App, area: Rect) {
             ),
             Line::styled("and proceed at your own discretion.", warn_text_style),
         ]);
-        let disclaimer_area = Rect::new(inner.x, content_top + 3, inner.width, 8);
+        let disclaimer_area = Rect::new(inner.x, content_top + 4, inner.width, 8);
         frame.render_widget(disclaimer, disclaimer_area);
     }
 
