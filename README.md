@@ -45,12 +45,14 @@ suitui --config /path/to/client.yaml
 | `t`          | Transaction history           |
 | `s`          | Send tokens                   |
 | `r`          | Refresh data                  |
+| `Ctrl+d`/`Ctrl+u` | Half-page scroll down/up |
 | `Esc`/`q`   | Quit (or close dropdown)      |
 | `Ctrl+C`    | Quit                          |
 
 ## Features
 
 - Object and address inspector with hyperlinked navigation
+- Checkpoint inspector with navigable transaction links
 - Transaction history and transaction inspector
 - Token transfers (select coin, enter recipient/amount, review, execute)
 - Per-coin decimal-aware balance formatting

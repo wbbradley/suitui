@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-03-15
+
+### Added
+- Checkpoint inspector with full UI, navigation, and key handling
+- Balance change addresses displayed and navigable in transaction inspector
+- Dynamic fields navigable via field_id fallback when child_id is absent
+- Prev Tx field in object inspector is now a navigable link
+- Sender/network header on all transfer modal steps
+- Recipient account selector (replaces free-text input)
+- Spendable balance display in transfer amount step (capped at 500 coins)
+- Gas budget reservation (0.05 SUI) in transfer amount validation
+- Mainnet disclaimer warning on send review step
+- Coin balance refresh when opening transfer modal
+- Sender/recipient cache invalidation after transfer
+
+### Fixed
+- 0x0 address excluded from inspector links and navigation
+- Transaction digest now included in execute transaction response
+
 ## [0.4.1] - 2026-03-15
 
 ### Added
