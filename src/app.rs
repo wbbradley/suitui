@@ -893,6 +893,13 @@ impl App {
         }
     }
 
+    fn invalidate_address_caches(&mut self, address: Address) {
+        self.coin_cache.retain(|(addr, _), _| *addr != address);
+        self.tx_history_cache
+            .retain(|(addr, _), _| *addr != address);
+        self.address_cache.retain(|(addr, _), _| *addr != address);
+    }
+
     fn force_refresh_coins(&mut self) {
         if let Some(key) = self.current_coin_key() {
             self.coin_cache.remove(&key);
@@ -1447,7 +1454,14 @@ impl App {
         };
         state.result = Some(exec_result.result);
         state.step = TransferStep::Complete;
-        // Clear coin cache so balances refresh after transfer
+
+        let sender = state.sender;
+        let recipient = state.recipient;
+        self.invalidate_address_caches(sender);
+        if let Some(recipient) = recipient
+            && self.accounts.iter().any(|(addr, _)| *addr == recipient) {
+                self.invalidate_address_caches(recipient);
+            }
         self.coin_displayed_key = None;
     }
 
@@ -3669,5 +3683,133 @@ mod tests {
         let state = app.transfer_state.as_ref().unwrap();
         assert!(state.amount_error.is_none());
         assert_eq!(state.step, TransferStep::Review);
+    }
+
+    #[test]
+    fn transfer_exec_evicts_sender_and_recipient_caches() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        let rpc = "https://testnet.example.com".to_string();
+        let sender = addrs[1]; // bob
+        let recipient = addrs[2]; // carol (in accounts)
+        let unrelated = addrs[0]; // alice
+
+        let coin_entry = || CoinCacheEntry {
+            balances: vec![],
+            error: None,
+            fetched_at: Instant::now(),
+        };
+        let tx_entry = || TxHistoryCacheEntry {
+            transactions: vec![],
+            error: None,
+            fetched_at: Instant::now(),
+        };
+        let addr_entry = || AddressCacheEntry {
+            data: AddressData::empty(),
+            error: None,
+            fetched_at: Instant::now(),
+        };
+
+        app.coin_cache.insert((sender, rpc.clone()), coin_entry());
+        app.coin_cache
+            .insert((recipient, rpc.clone()), coin_entry());
+        app.coin_cache
+            .insert((unrelated, rpc.clone()), coin_entry());
+        app.tx_history_cache
+            .insert((sender, rpc.clone()), tx_entry());
+        app.tx_history_cache
+            .insert((recipient, rpc.clone()), tx_entry());
+        app.address_cache
+            .insert((sender, rpc.clone()), addr_entry());
+        app.address_cache
+            .insert((recipient, rpc.clone()), addr_entry());
+
+        app.transfer_state = Some(TransferState {
+            step: TransferStep::Executing,
+            sender,
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
+            balances: vec![],
+            coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: Some(recipient),
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+            result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
+        });
+
+        app.handle_transfer_exec_result(TransferExecuteResult {
+            result: TransferResult::Success {
+                digest: "abc".into(),
+            },
+        });
+
+        // Sender caches evicted
+        assert!(!app.coin_cache.contains_key(&(sender, rpc.clone())));
+        assert!(!app.tx_history_cache.contains_key(&(sender, rpc.clone())));
+        assert!(!app.address_cache.contains_key(&(sender, rpc.clone())));
+        // Recipient (in accounts) caches evicted
+        assert!(!app.coin_cache.contains_key(&(recipient, rpc.clone())));
+        assert!(!app.tx_history_cache.contains_key(&(recipient, rpc.clone())));
+        assert!(!app.address_cache.contains_key(&(recipient, rpc.clone())));
+        // Unrelated address NOT evicted
+        assert!(app.coin_cache.contains_key(&(unrelated, rpc.clone())));
+    }
+
+    #[test]
+    fn transfer_exec_skips_external_recipient_cache() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        let rpc = "https://testnet.example.com".to_string();
+        let sender = addrs[1];
+        let external = Address::from_bytes([99u8; 32]).unwrap();
+
+        let coin_entry = || CoinCacheEntry {
+            balances: vec![],
+            error: None,
+            fetched_at: Instant::now(),
+        };
+
+        app.coin_cache.insert((sender, rpc.clone()), coin_entry());
+        app.coin_cache.insert((external, rpc.clone()), coin_entry());
+
+        app.transfer_state = Some(TransferState {
+            step: TransferStep::Executing,
+            sender,
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
+            balances: vec![],
+            coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: Some(external),
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+            result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
+        });
+
+        app.handle_transfer_exec_result(TransferExecuteResult {
+            result: TransferResult::Success {
+                digest: "abc".into(),
+            },
+        });
+
+        // Sender evicted
+        assert!(!app.coin_cache.contains_key(&(sender, rpc.clone())));
+        // External recipient NOT evicted
+        assert!(app.coin_cache.contains_key(&(external, rpc.clone())));
     }
 }
