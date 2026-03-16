@@ -5,8 +5,6 @@ balances — all from the command line.
 
 ## Install
 
-Requires a nightly Rust toolchain (edition 2024).
-
 ```sh
 cargo install suitui
 ```
