@@ -1019,6 +1019,27 @@ impl App {
         self.tx_history_cache
             .retain(|(addr, _), _| *addr != address);
         self.address_cache.retain(|(addr, _), _| *addr != address);
+        if self
+            .coin_displayed_key
+            .as_ref()
+            .is_some_and(|(addr, _)| *addr == address)
+        {
+            self.coin_displayed_key = None;
+        }
+        if self
+            .tx_history_displayed_key
+            .as_ref()
+            .is_some_and(|(addr, _)| *addr == address)
+        {
+            self.tx_history_displayed_key = None;
+        }
+        if self
+            .address_displayed_key
+            .as_ref()
+            .is_some_and(|(addr, _)| *addr == address)
+        {
+            self.address_displayed_key = None;
+        }
     }
 
     fn force_refresh_coins(&mut self) {
@@ -1607,7 +1628,6 @@ impl App {
         {
             self.invalidate_address_caches(recipient);
         }
-        self.coin_displayed_key = None;
     }
 
     fn trigger_spendable_fetch(&mut self) {
@@ -4066,6 +4086,11 @@ mod tests {
         app.address_cache
             .insert((recipient, rpc.clone()), addr_entry());
 
+        // Set displayed keys for sender and unrelated address
+        app.coin_displayed_key = Some((sender, rpc.clone()));
+        app.tx_history_displayed_key = Some((sender, rpc.clone()));
+        app.address_displayed_key = Some((sender, rpc.clone()));
+
         app.transfer_state = Some(TransferState {
             step: TransferStep::Executing,
             sender,
@@ -4098,12 +4123,70 @@ mod tests {
         assert!(!app.coin_cache.contains_key(&(sender, rpc.clone())));
         assert!(!app.tx_history_cache.contains_key(&(sender, rpc.clone())));
         assert!(!app.address_cache.contains_key(&(sender, rpc.clone())));
+        // Sender displayed keys cleared
+        assert!(app.coin_displayed_key.is_none());
+        assert!(app.tx_history_displayed_key.is_none());
+        assert!(app.address_displayed_key.is_none());
         // Recipient (in accounts) caches evicted
         assert!(!app.coin_cache.contains_key(&(recipient, rpc.clone())));
         assert!(!app.tx_history_cache.contains_key(&(recipient, rpc.clone())));
         assert!(!app.address_cache.contains_key(&(recipient, rpc.clone())));
         // Unrelated address NOT evicted
         assert!(app.coin_cache.contains_key(&(unrelated, rpc.clone())));
+    }
+
+    #[test]
+    fn transfer_exec_does_not_clear_unrelated_displayed_keys() {
+        let (mut app, addrs) = app_with_coins_and_key();
+        let rpc = "https://testnet.example.com".to_string();
+        let sender = addrs[1];
+        let unrelated = addrs[0];
+
+        let coin_entry = || CoinCacheEntry {
+            balances: vec![],
+            error: None,
+            fetched_at: Instant::now(),
+        };
+
+        app.coin_cache.insert((sender, rpc.clone()), coin_entry());
+
+        // Set displayed keys for unrelated address
+        app.coin_displayed_key = Some((unrelated, rpc.clone()));
+        app.tx_history_displayed_key = Some((unrelated, rpc.clone()));
+        app.address_displayed_key = Some((unrelated, rpc.clone()));
+
+        app.transfer_state = Some(TransferState {
+            step: TransferStep::Executing,
+            sender,
+            sender_alias: "bob".into(),
+            env_name: "testnet".into(),
+            chain_id: "bbb".into(),
+            is_mainnet: false,
+            balances: vec![],
+            coin_list_state: ListState::default(),
+            recipient_list_state: ListState::default(),
+            recipient_external_mode: false,
+            recipient_input: String::new(),
+            recipient_error: None,
+            recipient: None,
+            amount_input: String::new(),
+            amount_error: None,
+            amount_raw: None,
+            result: None,
+            spendable_state: SpendableState::Idle,
+            spendable_coin_type: None,
+        });
+
+        app.handle_transfer_exec_result(TransferExecuteResult {
+            result: TransferResult::Success {
+                digest: "abc".into(),
+            },
+        });
+
+        // Unrelated displayed keys NOT cleared
+        assert_eq!(app.coin_displayed_key, Some((unrelated, rpc.clone())));
+        assert_eq!(app.tx_history_displayed_key, Some((unrelated, rpc.clone())));
+        assert_eq!(app.address_displayed_key, Some((unrelated, rpc.clone())));
     }
 
     #[test]
